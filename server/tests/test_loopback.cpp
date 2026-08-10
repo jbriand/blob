@@ -291,7 +291,7 @@ TEST(Loopback, CursorChaseOverRealUdp)
     }
     ASSERT_TRUE(client.welcome.has_value()) << "no Welcome within the 5 s deadline";
     EXPECT_EQ(client.welcome->version, net::protocol_version);
-    EXPECT_EQ(client.welcome->version, 2u);
+    EXPECT_EQ(client.welcome->version, 3u);
     ASSERT_NE(client.welcome->player_id, 0u);
     EXPECT_EQ(client.welcome->world_extent, 8192u);
     EXPECT_EQ(client.welcome->tick_rate, 20u);

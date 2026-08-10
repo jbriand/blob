@@ -12,7 +12,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
+#include <string_view>
 
 namespace net = blob::net;
 
@@ -21,12 +23,11 @@ static_assert(net::entity_kind_count ==
               "EntityRecord::kind mirrors sim::EntityKind numerically — adding a kind is a "
               "wire change: extend the mirror and bump protocol_version");
 
-TEST(Snapshot, ProtocolVersionPinnedAtTwo)
+TEST(Snapshot, ProtocolVersionPinnedAtThree)
 {
-    // M1 introduced the snapshot message family — one bump for the whole
-    // iteration. If this fails, the wire format changed: bump consciously,
-    // then re-pin here.
-    EXPECT_EQ(net::protocol_version, 2);
+    // M6 batched the Hello payload and the Goodbye reasons into one bump. If
+    // this fails, the wire format changed: bump consciously, then re-pin here.
+    EXPECT_EQ(net::protocol_version, 3);
 }
 
 TEST(Snapshot, ChunkArithmeticFitsTheMtuBudget)
@@ -283,4 +284,139 @@ TEST(Snapshot, WriterOverflowSetsFlagInsteadOfScribbling)
     net::write_snapshot(w, 1u, sent);
     EXPECT_TRUE(w.overflowed);
     EXPECT_LE(w.offset, tiny.size());
+}
+
+// --- Hello (M6) -------------------------------------------------------------
+
+TEST(Hello, RoundTripsAtEveryInterestingNameLength)
+{
+    // 0 (anonymous default), 7 (typical), 16 (exactly the cap) — the cap
+    // itself must round-trip, not just lengths below it.
+    const std::string_view names[] = {"", "player7", "sixteen-bytes-xy"};
+    for (const std::string_view name : names) {
+        std::array<std::byte, net::hello_header_bytes + net::max_hello_name_bytes> buffer{};
+        net::ByteWriter w{buffer};
+        net::write_hello(w, net::protocol_version, name);
+        ASSERT_FALSE(w.overflowed) << "name '" << name << "'";
+        EXPECT_EQ(w.offset, net::hello_header_bytes + name.size());
+
+        net::ByteReader r{net::written(w)};
+        const std::optional<net::HelloPayload> hello = net::read_hello(r);
+        ASSERT_TRUE(hello.has_value()) << "name '" << name << "'";
+        EXPECT_EQ(hello->version, net::protocol_version);
+        ASSERT_EQ(hello->name_len, name.size());
+        EXPECT_EQ(std::string_view(hello->name.data(), hello->name_len), name);
+        EXPECT_TRUE(net::exhausted(r));
+        EXPECT_FALSE(r.underflowed);
+    }
+}
+
+TEST(Hello, NameLengthAboveTheCapIsRejectedEvenWithTheBytesPresent)
+{
+    // Hand-assemble what write_hello refuses to produce: name_len 17 with all
+    // 17 bytes genuinely there. The length cap itself is the violation.
+    std::array<std::byte, 64> buffer{};
+    net::ByteWriter w{buffer};
+    net::write_u8(w, static_cast<std::uint8_t>(net::MessageId::Hello));
+    net::write_u16(w, net::protocol_version);
+    net::write_u8(w, std::uint8_t{17});
+    for (int i = 0; i < 17; ++i) {
+        net::write_u8(w, std::uint8_t{'a'});
+    }
+    ASSERT_FALSE(w.overflowed);
+
+    net::ByteReader r{net::written(w)};
+    EXPECT_FALSE(net::read_hello(r).has_value());
+}
+
+TEST(Hello, EveryTruncationIsRejectedNotGuessed)
+{
+    // Every proper prefix of an 11-byte Hello (7-byte name): cutting the
+    // fixed prefix and cutting into the claimed name bytes must both fail.
+    std::array<std::byte, 32> buffer{};
+    net::ByteWriter w{buffer};
+    net::write_hello(w, net::protocol_version, "player7");
+    ASSERT_FALSE(w.overflowed);
+    const auto full = net::written(w);
+    ASSERT_EQ(full.size(), net::hello_header_bytes + 7u);
+
+    for (std::size_t len = 0; len < full.size(); ++len) {
+        net::ByteReader r{full.first(len)};
+        EXPECT_FALSE(net::read_hello(r).has_value()) << "length " << len;
+    }
+}
+
+TEST(Hello, WrongMessageIdIsRejected)
+{
+    std::array<std::byte, 32> buffer{};
+    net::ByteWriter w{buffer};
+    net::write_hello(w, net::protocol_version, "player7");
+    ASSERT_FALSE(w.overflowed);
+    buffer[0] = static_cast<std::byte>(net::MessageId::Input);
+
+    net::ByteReader r{net::written(w)};
+    EXPECT_FALSE(net::read_hello(r).has_value());
+}
+
+TEST(Hello, OversizedNameIsFlaggedMisuseNotTruncated)
+{
+    // One byte over the cap, plenty of buffer: the failure is the caller's
+    // (truncating is a UI decision, never the codec's), so the flag goes up
+    // and not a single byte lands — mirroring write_snapshot's span rule.
+    std::array<std::byte, 64> buffer{};
+    net::ByteWriter w{buffer};
+    net::write_hello(w, net::protocol_version, "seventeen-bytes-x");
+    EXPECT_TRUE(w.overflowed);
+    EXPECT_EQ(w.offset, 0u);
+}
+
+// --- Goodbye (M6) -----------------------------------------------------------
+
+TEST(Goodbye, RoundTripsEveryKnownReason)
+{
+    for (const net::GoodbyeReason reason :
+         {net::GoodbyeReason::VersionMismatch, net::GoodbyeReason::ServerFull,
+          net::GoodbyeReason::Shutdown}) {
+        std::array<std::byte, net::goodbye_bytes> buffer{};
+        net::ByteWriter w{buffer};
+        net::write_goodbye(w, reason);
+        ASSERT_FALSE(w.overflowed);
+        EXPECT_EQ(w.offset, net::goodbye_bytes);
+
+        net::ByteReader r{net::written(w)};
+        const std::optional<net::GoodbyeReason> read = net::read_goodbye(r);
+        ASSERT_TRUE(read.has_value());
+        EXPECT_EQ(*read, reason);
+        EXPECT_TRUE(net::exhausted(r));
+    }
+}
+
+TEST(Goodbye, UnknownReasonIsRejected)
+{
+    // 0 is deliberately unused (a zeroed buffer must not decode), 4 is the
+    // first value past the enum, 0xFF is arbitrary garbage.
+    for (const std::uint8_t bad : {std::uint8_t{0}, std::uint8_t{4}, std::uint8_t{0xFF}}) {
+        const std::array<std::byte, 2> raw{
+            static_cast<std::byte>(net::MessageId::Goodbye), static_cast<std::byte>(bad)};
+        net::ByteReader r{raw};
+        EXPECT_FALSE(net::read_goodbye(r).has_value()) << "reason " << static_cast<int>(bad);
+    }
+}
+
+TEST(Goodbye, TruncationAndWrongMessageIdAreRejected)
+{
+    std::array<std::byte, net::goodbye_bytes> buffer{};
+    net::ByteWriter w{buffer};
+    net::write_goodbye(w, net::GoodbyeReason::Shutdown);
+    ASSERT_FALSE(w.overflowed);
+    const auto full = net::written(w);
+
+    for (std::size_t len = 0; len < full.size(); ++len) {
+        net::ByteReader r{full.first(len)};
+        EXPECT_FALSE(net::read_goodbye(r).has_value()) << "length " << len;
+    }
+
+    buffer[0] = static_cast<std::byte>(net::MessageId::Welcome);
+    net::ByteReader r{net::written(w)};
+    EXPECT_FALSE(net::read_goodbye(r).has_value());
 }

@@ -98,6 +98,45 @@ std::optional<InputCommand> read_input(ByteReader& r) noexcept
     return r.underflowed ? std::nullopt : std::optional{cmd};
 }
 
+void write_hello(ByteWriter& w, std::uint16_t version, std::string_view name) noexcept
+{
+    // Length discipline is the caller's job. An oversized name is misuse, and
+    // misuse gets a flag and an untouched buffer (invariant 7) — the check
+    // runs before the first byte lands, mirroring write_snapshot.
+    if (name.size() > max_hello_name_bytes) {
+        w.overflowed = true;
+        return;
+    }
+    write_u8(w, static_cast<std::uint8_t>(MessageId::Hello));
+    write_u16(w, version);
+    write_u8(w, static_cast<std::uint8_t>(name.size()));
+    for (const char c : name) {
+        write_u8(w, static_cast<std::uint8_t>(c));
+    }
+}
+
+std::optional<HelloPayload> read_hello(ByteReader& r) noexcept
+{
+    if (remaining(r) < hello_header_bytes) {
+        return std::nullopt;
+    }
+    if (static_cast<MessageId>(read_u8(r)) != MessageId::Hello) {
+        return std::nullopt;
+    }
+    HelloPayload p{};
+    p.version  = read_u16(r);
+    p.name_len = read_u8(r);
+    // A length past the cap cannot come from write_hello, and a length past
+    // the bytes actually present is a lie — reject both before copying.
+    if (p.name_len > max_hello_name_bytes || remaining(r) < p.name_len) {
+        return std::nullopt;
+    }
+    for (std::uint8_t i = 0; i < p.name_len; ++i) {
+        p.name[i] = static_cast<char>(read_u8(r));
+    }
+    return r.underflowed ? std::nullopt : std::optional{p};
+}
+
 void write_welcome(ByteWriter& w, const WelcomePayload& payload) noexcept
 {
     write_u8(w, static_cast<std::uint8_t>(MessageId::Welcome));
@@ -121,6 +160,32 @@ std::optional<WelcomePayload> read_welcome(ByteReader& r) noexcept
     p.world_extent = read_u16(r);
     p.tick_rate = read_u8(r);
     return r.underflowed ? std::nullopt : std::optional{p};
+}
+
+void write_goodbye(ByteWriter& w, GoodbyeReason reason) noexcept
+{
+    write_u8(w, static_cast<std::uint8_t>(MessageId::Goodbye));
+    write_u8(w, static_cast<std::uint8_t>(reason));
+}
+
+std::optional<GoodbyeReason> read_goodbye(ByteReader& r) noexcept
+{
+    if (remaining(r) < goodbye_bytes) {
+        return std::nullopt;
+    }
+    if (static_cast<MessageId>(read_u8(r)) != MessageId::Goodbye) {
+        return std::nullopt;
+    }
+    const auto reason = static_cast<GoodbyeReason>(read_u8(r));
+    // Spelled as a whitelist, not a range check, so a reason removed from the
+    // enum some day starts being rejected without this line changing shape.
+    const bool known = reason == GoodbyeReason::VersionMismatch ||
+                       reason == GoodbyeReason::ServerFull ||
+                       reason == GoodbyeReason::Shutdown;
+    if (!known) {
+        return std::nullopt;
+    }
+    return r.underflowed ? std::nullopt : std::optional{reason};
 }
 
 void write_entity_record(ByteWriter& w, const EntityRecord& record) noexcept
