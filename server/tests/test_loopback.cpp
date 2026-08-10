@@ -1,15 +1,18 @@
 // End-to-end over real UDP, in one process: an ENet server host and an ENet
 // client host on 127.0.0.1, asserting the full chain the playable build
-// depends on — connect -> Welcome -> Input -> apply_intent -> step ->
-// snapshot broadcast -> client decodes and watches its own cell move.
+// depends on — connect -> Hello -> Welcome -> Input -> apply_intent -> step ->
+// per-peer snapshot send -> client decodes and watches its own cell move —
+// plus the refusal path: a Hello with the wrong version earns a
+// Goodbye{VersionMismatch} and a hang-up, never a spawn.
 //
 // The server half is a miniature made of the SAME building blocks main.cpp
-// wires together (sessions vector + sequence guard + apply_intent + step +
-// collect_records/write_snapshot broadcast) — main() itself is not callable
-// from a test, and manual play covers its wiring. One deliberate divergence:
-// main spawns via spawn_player (rng placement), the test spawns at a pinned
-// position so "chases the cursor rightward" cannot start clamped against the
-// world's right edge.
+// wires together (sessions vector + the half-open-until-Hello handshake +
+// sequence guard + apply_intent + step + collect_visible/collect_records_for
+// per-peer sends) — main() itself is not callable from a test, and manual
+// play covers its wiring. One deliberate divergence: main spawns via
+// spawn_player (rng placement), the test spawns at a pinned position so
+// "chases the cursor rightward" cannot start clamped against the world's
+// right edge.
 // Unlike main, the test drives step() directly instead of a tick loop, so it
 // finishes in milliseconds of wall time, not in 50 ms ticks.
 
@@ -19,6 +22,7 @@
 #include <blob/math/vec2.hpp>
 #include <blob/net/protocol.hpp>
 #include <blob/net/quantize.hpp>
+#include <blob/sim/interest.hpp>
 #include <blob/sim/world.hpp>
 
 #include <enet/enet.h>
@@ -31,6 +35,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -70,6 +75,7 @@ struct MiniServer {
     sim::World                               world;
     std::vector<blob::server::PlayerSession> sessions;
     sim::PlayerId                            next_player_id{1};
+    std::vector<std::uint32_t>               visible;
     std::vector<net::EntityRecord>           records;
 };
 
@@ -80,47 +86,77 @@ void server_handle_event(MiniServer& s, const ENetEvent& event)
         const sim::PlayerId id = s.next_player_id++;
         event.peer->data = reinterpret_cast<void*>(static_cast<std::uintptr_t>(id));
         blob::server::add_session(s.sessions, id);
-
-        // Pinned spawn (not spawn_player): the movement assert needs a cell
-        // with room to travel right — see the header comment.
-        const float extent = s.world.tuning.world_extent;
-        const float offset = 64.0f * static_cast<float>(id % 16u);
-        sim::spawn(s.world, sim::EntityKind::Cell,
-                   {extent * 0.5f + offset, extent * 0.5f + offset},
-                   s.world.tuning.spawn_mass, id);
-
-        std::array<std::byte, 8> buffer{};
-        net::ByteWriter          writer{.buffer = buffer};
-        net::write_welcome(writer, {.version      = net::protocol_version,
-                                    .player_id    = id,
-                                    .world_extent = static_cast<std::uint16_t>(extent),
-                                    .tick_rate    = static_cast<std::uint8_t>(s.world.tuning.tick_rate)});
-        const std::span<const std::byte> bytes = net::written(writer);
-        enet_peer_send(event.peer, channel_control,
-                       enet_packet_create(bytes.data(), bytes.size(), ENET_PACKET_FLAG_RELIABLE));
+        // Half-open until the Hello, exactly like main: no spawn, no Welcome.
         break;
     }
     case ENET_EVENT_TYPE_RECEIVE: {
+        const auto id = static_cast<sim::PlayerId>(
+            reinterpret_cast<std::uintptr_t>(event.peer->data));
+        blob::server::PlayerSession* session = blob::server::find_session(s.sessions, id);
+        if (session == nullptr) {
+            enet_packet_destroy(event.packet);
+            break;
+        }
         net::ByteReader reader{
             .buffer = {reinterpret_cast<const std::byte*>(event.packet->data),
                        event.packet->dataLength}};
-        if (const std::optional<net::InputCommand> cmd = net::read_input(reader)) {
-            const auto id = static_cast<sim::PlayerId>(
-                reinterpret_cast<std::uintptr_t>(event.peer->data));
-            if (blob::server::PlayerSession* session =
-                    blob::server::find_session(s.sessions, id)) {
-                if (!session->received_input ||
-                    blob::server::sequence_newer(cmd->sequence, session->last_sequence)) {
-                    session->received_input = true;
-                    session->last_sequence  = cmd->sequence;
-                    const blob::math::Vec2 direction = blob::math::normalized(
-                        {net::dequantize_direction(cmd->dir_x),
-                         net::dequantize_direction(cmd->dir_y)});
-                    sim::apply_intent(s.world, {.player    = id,
-                                                .direction = direction,
-                                                .split     = cmd->split,
-                                                .eject     = cmd->eject});
+
+        if (!session->received_hello) {
+            // The handshake gate, mirroring main's states: on a half-open
+            // session only a Hello means anything; a version mismatch earns a
+            // reliable Goodbye and a polite hang-up, a valid Hello earns the
+            // spawn and the Welcome.
+            if (const std::optional<net::HelloPayload> hello = net::read_hello(reader)) {
+                if (hello->version != net::protocol_version) {
+                    std::array<std::byte, net::goodbye_bytes> buffer{};
+                    net::ByteWriter writer{.buffer = buffer};
+                    net::write_goodbye(writer, net::GoodbyeReason::VersionMismatch);
+                    const std::span<const std::byte> bytes = net::written(writer);
+                    enet_peer_send(event.peer, channel_control,
+                                   enet_packet_create(bytes.data(), bytes.size(),
+                                                      ENET_PACKET_FLAG_RELIABLE));
+                    enet_peer_disconnect_later(event.peer, 0);
+                } else {
+                    session->nickname.assign(hello->name.data(), hello->name_len);
+                    session->received_hello = true;
+
+                    // Pinned spawn (not spawn_player): the movement assert
+                    // needs a cell with room to travel right — see the header
+                    // comment.
+                    const float extent = s.world.tuning.world_extent;
+                    const float offset = 64.0f * static_cast<float>(id % 16u);
+                    sim::spawn(s.world, sim::EntityKind::Cell,
+                               {extent * 0.5f + offset, extent * 0.5f + offset},
+                               s.world.tuning.spawn_mass, id);
+
+                    std::array<std::byte, 8> buffer{};
+                    net::ByteWriter          writer{.buffer = buffer};
+                    net::write_welcome(writer, {.version      = net::protocol_version,
+                                                .player_id    = id,
+                                                .world_extent = static_cast<std::uint16_t>(extent),
+                                                .tick_rate    = static_cast<std::uint8_t>(s.world.tuning.tick_rate)});
+                    const std::span<const std::byte> bytes = net::written(writer);
+                    enet_peer_send(event.peer, channel_control,
+                                   enet_packet_create(bytes.data(), bytes.size(),
+                                                      ENET_PACKET_FLAG_RELIABLE));
                 }
+            }
+            enet_packet_destroy(event.packet);
+            break;
+        }
+
+        if (const std::optional<net::InputCommand> cmd = net::read_input(reader)) {
+            if (!session->received_input ||
+                blob::server::sequence_newer(cmd->sequence, session->last_sequence)) {
+                session->received_input = true;
+                session->last_sequence  = cmd->sequence;
+                const blob::math::Vec2 direction = blob::math::normalized(
+                    {net::dequantize_direction(cmd->dir_x),
+                     net::dequantize_direction(cmd->dir_y)});
+                sim::apply_intent(s.world, {.player    = id,
+                                            .direction = direction,
+                                            .split     = cmd->split,
+                                            .eject     = cmd->eject});
             }
         }
         enet_packet_destroy(event.packet);
@@ -148,18 +184,51 @@ void service_server(MiniServer& s, enet_uint32 wait_ms)
     }
 }
 
+/// Per-peer snapshots, the same building blocks main wires together:
+/// centroid -> view_radius -> collect_visible_records -> chunks to that peer
+/// only. The over-budget truncation never triggers here (a pellet-free world
+/// is far below one chunk); its behavior is pinned in test_snapshot_encode.
 void server_broadcast(MiniServer& s)
 {
-    blob::server::collect_records(s.world, s.records);
+    // The shipped default budget: snapshot_chunks_per_tick (3) full chunks.
+    constexpr std::size_t budget = 3 * net::max_entities_per_chunk;
+
     const auto tick = static_cast<std::uint32_t>(s.world.tick);
-    blob::server::for_each_chunk(s.records, [&](std::span<const net::EntityRecord> chunk) {
-        std::array<std::byte, net::snapshot_soft_mtu> buffer;
-        net::ByteWriter writer{.buffer = buffer};
-        net::write_snapshot(writer, tick, chunk);
-        const std::span<const std::byte> bytes = net::written(writer);
-        enet_host_broadcast(s.host, channel_snapshot,
-                            enet_packet_create(bytes.data(), bytes.size(), 0));
-    });
+    for (std::size_t p = 0; p < s.host->peerCount; ++p) {
+        ENetPeer& peer = s.host->peers[p];
+        if (peer.state != ENET_PEER_STATE_CONNECTED) {
+            continue;
+        }
+        const auto id = static_cast<sim::PlayerId>(reinterpret_cast<std::uintptr_t>(peer.data));
+        blob::server::PlayerSession* session = blob::server::find_session(s.sessions, id);
+        if (session == nullptr || !session->received_hello) {
+            continue;   // half-open: no Welcome yet, so no world state either
+        }
+
+        blob::math::Vec2 weighted{};
+        float            total_mass = 0.0f;
+        for (const sim::Entity& e : s.world.entities) {
+            if (e.kind == sim::EntityKind::Cell && e.owner == id) {
+                weighted += e.position * e.mass;
+                total_mass += e.mass;
+            }
+        }
+        if (total_mass > 0.0f) {
+            session->last_centroid = weighted * (1.0f / total_mass);
+        }
+
+        blob::server::collect_visible_records(s.world, session->last_centroid,
+                                              sim::view_radius(s.world.tuning, total_mass),
+                                              budget, s.visible, s.records);
+        blob::server::for_each_chunk(s.records, [&](std::span<const net::EntityRecord> chunk) {
+            std::array<std::byte, net::snapshot_soft_mtu> buffer;
+            net::ByteWriter writer{.buffer = buffer};
+            net::write_snapshot(writer, tick, chunk);
+            const std::span<const std::byte> bytes = net::written(writer);
+            enet_peer_send(&peer, channel_snapshot,
+                           enet_packet_create(bytes.data(), bytes.size(), 0));
+        });
+    }
 }
 
 // --- the miniature client -------------------------------------------------
@@ -167,7 +236,11 @@ void server_broadcast(MiniServer& s)
 struct MiniClient {
     ENetHost*                                host{};
     ENetPeer*                                peer{};
+    std::uint16_t                            hello_version{net::protocol_version};
+    std::string_view                         nickname{"tester"};
     std::optional<net::WelcomePayload>       welcome;
+    std::optional<net::GoodbyeReason>        goodbye;
+    bool                                     disconnected{};
     std::uint32_t                            tick{};
     bool                                     any_snapshot{};
     std::vector<net::EntityRecord>           entities;
@@ -175,16 +248,34 @@ struct MiniClient {
 
 void client_handle_event(MiniClient& c, const ENetEvent& event)
 {
-    if (event.type != ENET_EVENT_TYPE_RECEIVE) {
-        return;
+    switch (event.type) {
+    case ENET_EVENT_TYPE_CONNECT: {
+        // Transport up -> introduce ourselves, exactly like the real client.
+        // hello_version is a knob so the mismatch scenario can lie.
+        std::array<std::byte, net::hello_header_bytes + net::max_hello_name_bytes> buffer{};
+        net::ByteWriter writer{.buffer = buffer};
+        net::write_hello(writer, c.hello_version, c.nickname);
+        const std::span<const std::byte> bytes = net::written(writer);
+        enet_peer_send(c.peer, channel_control,
+                       enet_packet_create(bytes.data(), bytes.size(), ENET_PACKET_FLAG_RELIABLE));
+        break;
     }
-    const std::span<const std::byte> data{
-        reinterpret_cast<const std::byte*>(event.packet->data), event.packet->dataLength};
+    case ENET_EVENT_TYPE_RECEIVE: {
+        const std::span<const std::byte> data{
+            reinterpret_cast<const std::byte*>(event.packet->data), event.packet->dataLength};
 
-    net::ByteReader welcome_reader{.buffer = data};
-    if (const std::optional<net::WelcomePayload> welcome = net::read_welcome(welcome_reader)) {
-        c.welcome = welcome;
-    } else {
+        net::ByteReader welcome_reader{.buffer = data};
+        if (const std::optional<net::WelcomePayload> welcome = net::read_welcome(welcome_reader)) {
+            c.welcome = welcome;
+            enet_packet_destroy(event.packet);
+            break;
+        }
+        net::ByteReader goodbye_reader{.buffer = data};
+        if (const std::optional<net::GoodbyeReason> goodbye = net::read_goodbye(goodbye_reader)) {
+            c.goodbye = goodbye;
+            enet_packet_destroy(event.packet);
+            break;
+        }
         net::ByteReader snapshot_reader{.buffer = data};
         std::array<net::EntityRecord, net::max_entities_per_chunk> chunk{};
         if (const std::optional<net::SnapshotHeader> header =
@@ -201,8 +292,15 @@ void client_handle_event(MiniClient& c, const ENetEvent& event)
                 c.entities.insert(c.entities.end(), first, last);
             }
         }
+        enet_packet_destroy(event.packet);
+        break;
     }
-    enet_packet_destroy(event.packet);
+    case ENET_EVENT_TYPE_DISCONNECT:
+        c.disconnected = true;
+        break;
+    default:
+        break;
+    }
 }
 
 void service_client(MiniClient& c, enet_uint32 wait_ms)
@@ -259,7 +357,7 @@ TEST(Loopback, CursorChaseOverRealUdp)
 
     MiniServer server{};
     // The wire chain is the thing under test, not gameplay: an empty pellet
-    // field keeps every broadcast a single deterministic chunk, the spawn
+    // field keeps every send a single deterministic chunk, the spawn
     // mass exactly 10 on first sighting, and the post-disconnect world
     // exactly empty. Eating has its own suite in core.
     server.world.tuning.target_pellet_count = 0;
@@ -284,7 +382,7 @@ TEST(Loopback, CursorChaseOverRealUdp)
     // failed assertion with a message — never a hang.
     const auto deadline = steady_clock::now() + std::chrono::seconds{5};
 
-    // --- connect -> Welcome ---
+    // --- connect -> Hello -> Welcome ---
     while (!client.welcome && steady_clock::now() < deadline) {
         service_server(server, 2);
         service_client(client, 2);
@@ -296,9 +394,12 @@ TEST(Loopback, CursorChaseOverRealUdp)
     EXPECT_EQ(client.welcome->world_extent, 8192u);
     EXPECT_EQ(client.welcome->tick_rate, 20u);
     ASSERT_EQ(server.sessions.size(), 1u);
+    // The Hello did the introducing: state flipped, nickname stored.
+    EXPECT_TRUE(server.sessions[0].received_hello);
+    EXPECT_EQ(server.sessions[0].nickname, "tester");
 
-    // --- input -> apply -> step -> broadcast -> decode, until the cell has
-    // demonstrably chased the cursor rightward ---
+    // --- input -> apply -> step -> per-peer send -> decode, until the cell
+    // has demonstrably chased the cursor rightward ---
     const float         extent = static_cast<float>(client.welcome->world_extent);
     std::optional<float> first_x;
     float               last_x   = 0.0f;
@@ -341,4 +442,59 @@ TEST(Loopback, CursorChaseOverRealUdp)
     EXPECT_TRUE(server.sessions.empty()) << "server never saw the disconnect within 5 s";
     EXPECT_TRUE(server.world.entities.empty());   // placeholder despawn ran
     // Hosts are destroyed by the guards, then EnetGuard deinitializes.
+}
+
+TEST(Loopback, VersionMismatchIsRefusedWithGoodbye)
+{
+    const EnetGuard enet;
+    ASSERT_TRUE(enet.ok);
+
+    ENetAddress bind_address{};
+    ASSERT_EQ(enet_address_set_host(&bind_address, "127.0.0.1"), 0);
+    bind_address.port = loopback_port;
+
+    MiniServer server{};
+    server.world.tuning.target_pellet_count = 0;   // same reasoning as above
+    server.host = enet_host_create(&bind_address, 8,
+                                   static_cast<std::size_t>(net::Channel::Count), 0, 0);
+    ASSERT_NE(server.host, nullptr) << "cannot bind 127.0.0.1:" << loopback_port;
+    const HostGuard server_guard{server.host};
+
+    // A client speaking a version this server never will.
+    MiniClient client{};
+    client.hello_version = 999;
+    client.host = enet_host_create(nullptr, 1,
+                                   static_cast<std::size_t>(net::Channel::Count), 0, 0);
+    ASSERT_NE(client.host, nullptr);
+    const HostGuard client_guard{client.host};
+
+    ENetAddress connect_address = bind_address;
+    client.peer = enet_host_connect(client.host, &connect_address,
+                                    static_cast<std::size_t>(net::Channel::Count), 0);
+    ASSERT_NE(client.peer, nullptr);
+
+    const auto deadline = steady_clock::now() + std::chrono::seconds{5};
+
+    // The refusal: a reliable Goodbye{VersionMismatch} on Control — the
+    // server finally refuses symmetrically instead of trusting the client to
+    // walk away — and never a Welcome.
+    while (!client.goodbye && steady_clock::now() < deadline) {
+        service_server(server, 2);
+        service_client(client, 2);
+    }
+    ASSERT_TRUE(client.goodbye.has_value()) << "no Goodbye within the 5 s deadline";
+    EXPECT_EQ(*client.goodbye, net::GoodbyeReason::VersionMismatch);
+    EXPECT_FALSE(client.welcome.has_value());
+
+    // And the hang-up completes from both ends (disconnect_later flushes the
+    // Goodbye first), leaving nothing behind: the refused peer never spawned
+    // and its session is reaped by the disconnect.
+    while ((!client.disconnected || !server.sessions.empty()) &&
+           steady_clock::now() < deadline) {
+        service_server(server, 2);
+        service_client(client, 2);
+    }
+    EXPECT_TRUE(client.disconnected) << "server never hung up within 5 s";
+    EXPECT_TRUE(server.sessions.empty());
+    EXPECT_TRUE(server.world.entities.empty());   // a refused peer never spawns
 }

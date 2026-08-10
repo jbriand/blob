@@ -11,6 +11,7 @@
 #include <blob/math/vec2.hpp>
 #include <blob/net/protocol.hpp>
 #include <blob/net/quantize.hpp>
+#include <blob/sim/interest.hpp>
 #include <blob/sim/world.hpp>
 
 #include <enet/enet.h>
@@ -149,6 +150,13 @@ struct ServerState {
     blob::sim::PlayerId                      next_player_id{1};
 };
 
+/// Broadcast-time scratch, parallel to ServerState::sessions: one player's
+/// view inputs, rebuilt by a single walk over the entities each broadcast.
+struct SessionView {
+    blob::math::Vec2 weighted_position{};   ///< Σ position·mass over the player's cells
+    float            total_mass{};          ///< 0 = no cells this instant (mid-respawn)
+};
+
 void handle_connect(ServerState& state, ENetPeer& peer)
 {
     // Monotonic, never reused within a run (0 stays the "no owner" sentinel;
@@ -161,16 +169,49 @@ void handle_connect(ServerState& state, ENetPeer& peer)
     tag_peer(peer, id);
     blob::server::add_session(state.sessions, id);
 
+    // The session is half-open until the Hello arrives (M6): no spawn, no
+    // Welcome, no snapshots — the version check must pass before the world
+    // spends anything on this peer. A client that never says Hello is reaped
+    // by ENet's own connection timeout; a dedicated Hello deadline is a known
+    // simplification deferred until it is a measured problem.
+    std::printf("player %u connected (%x:%u), awaiting Hello\n",
+                id, peer.address.host, peer.address.port);
+}
+
+/// The second half of the handshake: validate the Hello, then (and only then)
+/// spawn and send the Welcome the client is waiting for.
+void handle_hello(ServerState& state, ENetPeer& peer, blob::server::PlayerSession& session,
+                  const blob::net::HelloPayload& hello)
+{
+    if (hello.version != blob::net::protocol_version) {
+        // Symmetric refusal at last (the client has refused via the Welcome
+        // version since M1). Goodbye is session state: reliable Control, and
+        // disconnect_later so the reason actually flushes before the teardown.
+        std::array<std::byte, blob::net::goodbye_bytes> buffer{};
+        blob::net::ByteWriter                           writer{.buffer = buffer};
+        blob::net::write_goodbye(writer, blob::net::GoodbyeReason::VersionMismatch);
+        const std::span<const std::byte> bytes = blob::net::written(writer);
+        ENetPacket* packet = enet_packet_create(bytes.data(), bytes.size(), ENET_PACKET_FLAG_RELIABLE);
+        enet_peer_send(&peer, static_cast<enet_uint8>(blob::net::Channel::Control), packet);
+        enet_peer_disconnect_later(&peer, 0);
+        std::printf("player %u refused: speaks v%u, server speaks v%u\n",
+                    session.id, hello.version, blob::net::protocol_version);
+        return;
+    }
+
+    session.nickname.assign(hello.name.data(), hello.name_len);
+    session.received_hello = true;
+
     // M3 lifecycle: one starting cell of spawn_mass at an rng position (naive
     // placement — safe-spawn polish is M5's job).
-    blob::sim::spawn_player(state.world, id);
+    blob::sim::spawn_player(state.world, session.id);
 
     // Welcome is session state: reliable Control channel (invariant 5).
     std::array<std::byte, 8> buffer{};
     blob::net::ByteWriter    writer{.buffer = buffer};
     blob::net::write_welcome(writer, {
         .version      = blob::net::protocol_version,
-        .player_id    = id,
+        .player_id    = session.id,
         .world_extent = static_cast<std::uint16_t>(state.world.tuning.world_extent),
         .tick_rate    = static_cast<std::uint8_t>(state.world.tuning.tick_rate),
     });
@@ -178,23 +219,35 @@ void handle_connect(ServerState& state, ENetPeer& peer)
     ENetPacket* packet = enet_packet_create(bytes.data(), bytes.size(), ENET_PACKET_FLAG_RELIABLE);
     enet_peer_send(&peer, static_cast<enet_uint8>(blob::net::Channel::Control), packet);
 
-    std::printf("player %u connected (%x:%u)\n", id, peer.address.host, peer.address.port);
+    std::printf("player %u ('%s') joined\n", session.id, session.nickname.c_str());
 }
 
 void handle_receive(ServerState& state, ENetPeer& peer, const ENetPacket& packet)
 {
-    // Only Input arrives today; read_input rejects everything else (wrong
-    // MessageId, truncation) and malformed wire data is dropped, never fatal.
-    blob::net::ByteReader reader{
-        .buffer = {reinterpret_cast<const std::byte*>(packet.data), packet.dataLength}};
-    const std::optional<blob::net::InputCommand> cmd = blob::net::read_input(reader);
-    if (!cmd) {
-        return;
-    }
     blob::server::PlayerSession* session =
         blob::server::find_session(state.sessions, peer_id(peer));
     if (session == nullptr) {
         return;   // no session for this peer (races a disconnect) — ignore
+    }
+
+    blob::net::ByteReader reader{
+        .buffer = {reinterpret_cast<const std::byte*>(packet.data), packet.dataLength}};
+
+    // Half-open session: the only message that means anything before the
+    // Hello is the Hello. Anything else — an early Input, garbage — is
+    // dropped, never fatal (the robustness contract).
+    if (!session->received_hello) {
+        if (const std::optional<blob::net::HelloPayload> hello = blob::net::read_hello(reader)) {
+            handle_hello(state, peer, *session, *hello);
+        }
+        return;
+    }
+
+    // Established session: only Input arrives; read_input rejects everything
+    // else (wrong MessageId, truncation) and malformed wire data is dropped.
+    const std::optional<blob::net::InputCommand> cmd = blob::net::read_input(reader);
+    if (!cmd) {
+        return;
     }
 
     // Serial-number guard: the input stream is unreliable and unordered, so
@@ -292,7 +345,17 @@ int main(int argc, char** argv)
     state.world.tuning = config->tuning;
     auto loop = blob::server::make_tick_loop(state.world.tuning.tick_rate);
 
-    std::vector<blob::net::EntityRecord> records;   // reused across iterations
+    // Per-peer encode scratch, all reused across iterations (steady-state
+    // zero allocation at 20 Hz).
+    std::vector<blob::net::EntityRecord> records;
+    std::vector<std::uint32_t>           visible;   // collect_visible output
+    std::vector<SessionView>             views;     // parallel to state.sessions
+
+    // Budget per peer per tick, in records: over-cap visible sets are cut to
+    // the nearest entities so one crowded view cannot monopolize the uplink.
+    const std::size_t snapshot_budget =
+        static_cast<std::size_t>(config->snapshot_chunks_per_tick) *
+        blob::net::max_entities_per_chunk;
 
     std::printf("blob-server listening on udp/%u, %d Hz, %zu peer slots\n",
                 config->port, state.world.tuning.tick_rate, config->max_clients);
@@ -322,25 +385,71 @@ int main(int argc, char** argv)
             }
         }
 
-        // Broadcast once per outer iteration, never per catch-up tick: nobody
-        // renders the intermediate states of a catch-up burst, so only the
-        // final one is worth bandwidth.
+        // Send snapshots once per outer iteration, never per catch-up tick:
+        // nobody renders the intermediate states of a catch-up burst, so only
+        // the final one is worth bandwidth. Per-peer since M6 — each session
+        // gets its own visible set instead of the whole world.
         if (ticks_this_iteration > 0 && !state.sessions.empty()) {
-            blob::server::collect_records(state.world, records);
+            // One O(n) walk builds every player's view inputs (total cell
+            // mass + mass-weighted centroid — where the camera naturally
+            // sits). A session with no cells this instant (mid-respawn edge)
+            // keeps its last centroid and queries with mass 0.
+            views.assign(state.sessions.size(), SessionView{});
+            for (const blob::sim::Entity& e : state.world.entities) {
+                if (e.kind != blob::sim::EntityKind::Cell || e.owner == 0) {
+                    continue;
+                }
+                for (std::size_t s = 0; s < state.sessions.size(); ++s) {
+                    // Linear find: right at 64 peers (see session.hpp).
+                    if (state.sessions[s].id == e.owner) {
+                        views[s].weighted_position += e.position * e.mass;
+                        views[s].total_mass += e.mass;
+                        break;
+                    }
+                }
+            }
+            for (std::size_t s = 0; s < state.sessions.size(); ++s) {
+                if (views[s].total_mass > 0.0f) {
+                    state.sessions[s].last_centroid =
+                        views[s].weighted_position * (1.0f / views[s].total_mass);
+                }
+            }
+
             const auto tick = static_cast<std::uint32_t>(state.world.tick);
-            blob::server::for_each_chunk(
-                records, [&](std::span<const blob::net::EntityRecord> chunk) {
-                    std::array<std::byte, blob::net::snapshot_soft_mtu> buffer;
-                    blob::net::ByteWriter writer{.buffer = buffer};
-                    blob::net::write_snapshot(writer, tick, chunk);
-                    const std::span<const std::byte> bytes = blob::net::written(writer);
-                    // Flags 0 = unreliable sequenced: ENet drops a chunk that
-                    // arrives after a newer tick's, which is benign — records
-                    // are absolute state, already superseded (invariant 5).
-                    ENetPacket* packet = enet_packet_create(bytes.data(), bytes.size(), 0);
-                    enet_host_broadcast(host, static_cast<enet_uint8>(blob::net::Channel::Snapshot),
-                                        packet);
-                });
+            for (std::size_t p = 0; p < host->peerCount; ++p) {
+                ENetPeer& peer = host->peers[p];
+                if (peer.state != ENET_PEER_STATE_CONNECTED) {
+                    continue;
+                }
+                blob::server::PlayerSession* session =
+                    blob::server::find_session(state.sessions, peer_id(peer));
+                if (session == nullptr || !session->received_hello) {
+                    continue;   // half-open: no Welcome yet, so no world state either
+                }
+                const auto s = static_cast<std::size_t>(session - state.sessions.data());
+
+                // Everything this peer can see, cut to the budget nearest,
+                // encoded — the deterministic selection lives in
+                // snapshot_encode so the budget behavior is unit-testable.
+                blob::server::collect_visible_records(
+                    state.world, session->last_centroid,
+                    blob::sim::view_radius(state.world.tuning, views[s].total_mass),
+                    snapshot_budget, visible, records);
+                blob::server::for_each_chunk(
+                    records, [&](std::span<const blob::net::EntityRecord> chunk) {
+                        std::array<std::byte, blob::net::snapshot_soft_mtu> buffer;
+                        blob::net::ByteWriter writer{.buffer = buffer};
+                        blob::net::write_snapshot(writer, tick, chunk);
+                        const std::span<const std::byte> bytes = blob::net::written(writer);
+                        // Flags 0 = unreliable sequenced: ENet drops a chunk
+                        // that arrives after a newer tick's, which is benign —
+                        // records are absolute state, already superseded
+                        // (invariant 5).
+                        ENetPacket* packet = enet_packet_create(bytes.data(), bytes.size(), 0);
+                        enet_peer_send(&peer, static_cast<enet_uint8>(blob::net::Channel::Snapshot),
+                                       packet);
+                    });
+            }
         }
 
         // Sleep out the remainder inside ENet so a packet can wake us early —
