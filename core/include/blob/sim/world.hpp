@@ -21,10 +21,25 @@ struct Entity {
     EntityKind  kind{EntityKind::Pellet};
     math::Vec2  position{};
     math::Vec2  velocity{};
+    /// Decaying launch velocity — the split kick. A separate field on
+    /// purpose: intent overwrites `velocity` every tick, so an impulse
+    /// stored there would vanish after one step. This one is ADDED during
+    /// integration and damped by e^(−impulse_damping_rate·dt), which keeps
+    /// it frame-rate independent (invariant 3). EjectedMass has no intent,
+    /// so its flight lives in `velocity` instead and decays by the same λ.
+    /// Server-side only — never crosses the wire (`EntityRecord` and
+    /// `protocol_version` are untouched by M4).
+    math::Vec2  impulse{};
     float       mass{};
-    /// Marked by eat resolution inside step() and compacted away before the
-    /// step returns — never true between steps, so it never crosses the wire
-    /// (`EntityRecord` and `protocol_version` are untouched by M3).
+    /// Seconds until this Cell may merge with a same-owner sibling. Armed by
+    /// split (base + per-mass scale), dt-decremented by step() and floored
+    /// at exactly 0.0f — which is what the merge gate tests. Server-side
+    /// only, like `impulse`.
+    float       merge_cooldown{};
+    /// Marked by eat resolution (and same-owner merges) inside step() and
+    /// compacted away before the step returns — never true between steps,
+    /// so it never crosses the wire (`EntityRecord` and `protocol_version`
+    /// are untouched by M3).
     bool        dead{};
 };
 
@@ -77,6 +92,10 @@ struct World {
     /// contents mean nothing outside step().
     std::vector<PlayerId>     owners_before_scratch;
     std::vector<PlayerId>     owners_after_scratch;
+
+    /// step() scratch (alive Cell indices, grouped by owner) for same-owner
+    /// resolution — same capacity-reuse-only contract as above.
+    std::vector<std::uint32_t> cell_scratch;
 };
 
 /// A world whose PRNG starts from `seed`. The seed is part of the replayed
