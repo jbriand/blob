@@ -215,10 +215,19 @@ void handle_receive(ServerState& state, ENetPeer& peer, const ENetPacket& packet
         blob::net::dequantize_direction(cmd->dir_x),
         blob::net::dequantize_direction(cmd->dir_y)});
 
+    // Three-layer edge (M4): the client sends split/eject on a key-press
+    // only; the session latches them here — OR, never assign, so a press
+    // cannot be lost under later Inputs that carry false — and the pre-pump
+    // injection in main() hands each latch to exactly one simulated tick,
+    // whose action phase in core consumes it. The intent applied below
+    // carries only steering; the flags travel via the latch.
+    session->pending_split |= cmd->split;
+    session->pending_eject |= cmd->eject;
+
     blob::sim::apply_intent(state.world, {.player    = session->id,
                                           .direction = direction,
-                                          .split     = cmd->split,
-                                          .eject     = cmd->eject});
+                                          .split     = false,
+                                          .eject     = false});
 }
 
 void handle_disconnect(ServerState& state, ENetPeer& peer)
@@ -305,8 +314,45 @@ int main(int argc, char** argv)
             handle_event(state, event);
         }
 
+        // M4 latch injection — once per outer iteration, never per catch-up
+        // step: however late the loop runs, a press fires exactly one action.
+        // Gated on due > 0 because the stored intent is a safe carrier only
+        // for ticks about to run: on a zero-tick iteration the flag would sit
+        // on the intent through the service sleep below, where the next
+        // Input's apply_intent (which carries false flags) would erase it —
+        // the latch, not the intent, is where a press waits.
+        const int due = blob::server::pump(loop);
+        if (due > 0) {
+            for (blob::server::PlayerSession& session : state.sessions) {
+                if (!session.pending_split && !session.pending_eject) {
+                    continue;
+                }
+                bool found = false;
+                for (blob::sim::PlayerIntent& intent : state.world.intents) {
+                    if (intent.player == session.id) {
+                        intent.split |= session.pending_split;
+                        intent.eject |= session.pending_eject;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    // No steering stored yet (no Input decoded since the
+                    // intent was last erased): a zero direction splits in
+                    // place and ejects nothing, both core's documented rules.
+                    blob::sim::apply_intent(state.world,
+                                            {.player    = session.id,
+                                             .direction = {},
+                                             .split     = session.pending_split,
+                                             .eject     = session.pending_eject});
+                }
+                session.pending_split = false;
+                session.pending_eject = false;
+            }
+        }
+
         int ticks_this_iteration = 0;
-        for (int i = blob::server::pump(loop); i > 0; --i) {
+        for (int i = due; i > 0; --i) {
             blob::sim::step(state.world, blob::sim::tick_dt(state.world.tuning));
             ++ticks_this_iteration;
 
