@@ -1,0 +1,11 @@
+build/
+install/
+ext/
+out/
+.cache/
+compile_commands.json
+CMakeUserPresets.json
+.vs/
+.vscode/
+*.user
+.claude/settings.local.json

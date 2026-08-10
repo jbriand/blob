@@ -1,0 +1,120 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja Multi-Config",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "installDir": "${sourceDir}/install/${presetName}",
+      "cacheVariables": {
+        "CMAKE_CONFIGURATION_TYPES": "Debug;RelWithDebInfo;Release",
+        "CMAKE_CROSS_CONFIGS": "all",
+        "CMAKE_DEFAULT_BUILD_TYPE": "Debug",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_CXX_STANDARD": "23",
+        "BLOB_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+
+    {
+      "name": "windows-clang",
+      "displayName": "Windows · clang-cl · Ninja Multi-Config",
+      "description": "Run from a Developer PowerShell (or after vcvars64) so clang-cl finds the Windows SDK.",
+      "inherits": "base",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang-cl",
+        "CMAKE_CXX_COMPILER": "clang-cl",
+        "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
+      }
+    },
+    {
+      "name": "windows-clang-headless",
+      "displayName": "Windows · clang-cl · server + core only",
+      "inherits": "windows-clang",
+      "cacheVariables": { "BLOB_BUILD_CLIENT": "OFF" }
+    },
+
+    {
+      "name": "linux-clang",
+      "displayName": "Linux · clang++ · Ninja Multi-Config",
+      "inherits": "base",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++"
+      }
+    },
+    {
+      "name": "linux-clang-headless",
+      "displayName": "Linux · clang++ · server + core only (no X11/GPU)",
+      "description": "What CI and a dedicated game server box build. Proves no SFML symbol leaked into server/.",
+      "inherits": "linux-clang",
+      "cacheVariables": { "BLOB_BUILD_CLIENT": "OFF" }
+    },
+    {
+      "name": "linux-clang-asan",
+      "displayName": "Linux · clang++ · ASan + UBSan",
+      "inherits": "linux-clang",
+      "cacheVariables": {
+        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined"
+      }
+    }
+  ],
+
+  "buildPresets": [
+    { "name": "windows-clang-debug",   "configurePreset": "windows-clang",          "configuration": "Debug" },
+    { "name": "windows-clang-release", "configurePreset": "windows-clang",          "configuration": "Release" },
+    { "name": "windows-headless-debug","configurePreset": "windows-clang-headless", "configuration": "Debug" },
+    { "name": "linux-clang-debug",     "configurePreset": "linux-clang",            "configuration": "Debug" },
+    { "name": "linux-clang-release",   "configurePreset": "linux-clang",            "configuration": "Release" },
+    { "name": "linux-headless-debug",  "configurePreset": "linux-clang-headless",   "configuration": "Debug" },
+    { "name": "linux-asan-debug",      "configurePreset": "linux-clang-asan",       "configuration": "Debug" }
+  ],
+
+  "testPresets": [
+    {
+      "name": "windows-clang-debug",
+      "configurePreset": "windows-clang",
+      "configuration": "Debug",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error", "stopOnFailure": false }
+    },
+    {
+      "name": "linux-clang-debug",
+      "configurePreset": "linux-clang",
+      "configuration": "Debug",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error", "stopOnFailure": false }
+    },
+    {
+      "name": "linux-asan-debug",
+      "configurePreset": "linux-clang-asan",
+      "configuration": "Debug",
+      "output": { "outputOnFailure": true }
+    }
+  ],
+
+  "workflowPresets": [
+    {
+      "name": "windows-dev",
+      "steps": [
+        { "type": "configure", "name": "windows-clang" },
+        { "type": "build",     "name": "windows-clang-debug" },
+        { "type": "test",      "name": "windows-clang-debug" }
+      ]
+    },
+    {
+      "name": "linux-dev",
+      "steps": [
+        { "type": "configure", "name": "linux-clang" },
+        { "type": "build",     "name": "linux-clang-debug" },
+        { "type": "test",      "name": "linux-clang-debug" }
+      ]
+    }
+  ]
+}
