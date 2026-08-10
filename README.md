@@ -144,13 +144,16 @@ byte-ranged `√mass` as the fallback after that. Either change bumps
 # every key is documented in server/blob-server.cfg.example)
 build/windows-clang/bin/Debug/blob-server.exe
 
-# terminals 2+ — one window per player
-build/windows-clang/bin/Debug/blob-client.exe 127.0.0.1 7777
+# terminals 2+ — one window per player (third argument: nickname, ≤16 chars)
+build/windows-clang/bin/Debug/blob-client.exe 127.0.0.1 7777 ada
 ```
 
-The cursor steers. Eat pellets and smaller players to grow; get eaten and you
-respawn instantly. Esc quits. Rendering is the raw 20 Hz snapshot stream —
-interpolation is the next client iteration.
+The cursor steers; **Space** splits, **W** ejects mass. Eat pellets and
+smaller players to grow; hold the cursor between your halves to remerge once
+their cooldowns expire; feed a virus seven ejects and it fires a new virus at
+whoever you aim it; pop a virus while big and you burst apart. Get eaten and
+you respawn away from threats. Esc quits. Rendering is the raw 20 Hz snapshot
+stream — interpolation is the next client iteration.
 
 ## What's actually implemented
 
@@ -164,23 +167,31 @@ Playable: cursor-chase, pellets, eating and respawns over real UDP (see
   snapshot codec (protocol v2): 13 B entity records in self-contained chunks of
   at most 91 against a 1200 B soft MTU. net is standalone — wire types are raw
   integers; the `sim::EntityKind` mirror is asserted where the tests link both.
+  Protocol v3 adds Hello (version + nickname) and Goodbye reasons — version
+  refusal is symmetric.
 - `core/sim` — `World` with a frame-rate-independent `step(world, dt)`:
   mass-dependent speed, eating (ratio + centre-depth gates), player deaths,
   a self-restoring pellet field from an injected seeded PRNG, exponential
   mass decay, and `spawn_player`/`despawn_player`. Every gameplay constant
   lives in the `Tuning` aggregate (overridable by the server config file);
   uniform CSR `SpatialGrid` rebuilt inside the step; `StepEvents` (eats,
-  deaths) exposed as a `World` field. Split/eject and merge are M4.
+  deaths) exposed as a `World` field. Split/eject/merge (impulse kicks with
+  exact-integral decay, mass-scaled cooldowns, steered remerging), viruses
+  (pop bursts through the shared split machinery, ejected-mass feeding) and
+  safe spawn complete the genre loop; `interest.hpp` answers who-sees-what.
 - `server` — fixed-timestep `TickLoop` with a catch-up clamp; config file
   (pure parser, fail-loud line-numbered errors, wire-width validation);
   sessions with a u16-wraparound sequence guard; Welcome on connect; Input
   dequantized then re-normalized (the authoritative side sanitizes intent);
-  chunked snapshot broadcast on the unreliable channel; death → instant
-  respawn.
+  half-open handshake (no spawn until a valid Hello; wrong version → Goodbye);
+  per-peer interest-managed snapshots — visible set, nearest-first, hard chunk
+  budget — on the unreliable channel; one-shot action latching; death →
+  instant safe respawn.
 - `client` — SFML 3 window that connects, version-checks the Welcome, streams
   quantized intent at the server's tick rate, assembles chunked snapshots,
-  and renders the latest state with the camera on your cell.
-- 86 GoogleTest cases across two targets — `blob_core_tests` (label `core`)
+  and renders the latest state with the camera on your cell. Space splits,
+  W ejects; optional nickname as the third argument.
+- 130 GoogleTest cases across two targets — `blob_core_tests` (label `core`)
   and `blob_server_tests` (label `server`) — including a 200-tick
   replay-determinism check with exact float equality, differential grid tests
   with an O(n²) tripwire, exhaustive snapshot-truncation rejection, and a

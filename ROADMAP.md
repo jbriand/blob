@@ -126,7 +126,21 @@ Tests: ratio/overlap boundary cases just-above and just-below; id stability acro
 compaction; pellet count restoration; decay is dt-independent; **replay determinism** —
 same seed + same intent script → identical entity state after N ticks (same binary).
 
-## M4 — Split, eject, merge  `core/sim`  (size: L)
+## M4 — Split, eject, merge  `core/sim`  (size: L) — ✅ shipped 2026-08-10
+
+*Landed via branch `m4-split-merge`. Refinements over the spec: (1) the split kick lives in
+a dedicated decaying `Entity.impulse` field (intent overwrites `velocity` every tick), and
+integration uses the exact integral `impulse·(1−e^(−λ·dt))/λ` — a rectangle rule's travel
+varies ~16% with the slicing and would break frame-rate independence; (2) same-owner
+resolution is per-player all-pairs — the ≤16 cap makes O(k²) free and sidesteps the grid's
+candidate-pair distance limit (that query remains unused, available for future
+different-owner mechanics); (3) the "push-apart WHILE cooldowns run" phrasing below turned
+out load-bearing and was restored at integration: unconditional correction parks
+post-cooldown siblings at touching and makes steered remerging unreachable; (4) eject
+placement is rim-to-rim, derived from existing knobs; (5) the server's action latch injects
+only on iterations that will tick — otherwise a press could be erased by the next
+steering-only input before any step consumed it. One-shot = client key-press edge → server
+OR-latch → core consume-and-clear. 12 tests + a 300-tick replay extension.*
 
 **Goal:** the skill layer — multi-cell players.
 
@@ -146,7 +160,17 @@ Ships:
 Tests: mass conservation through split; 16-cap enforced; merge gated by the cooldown;
 eject travel distance independent of tick rate; the whole existing suite still green.
 
-## M5 — Viruses & spawn polish  `core/sim`  (size: M, deferrable)
+## M5 — Viruses & spawn polish  `core/sim`  (size: M, deferrable) — ✅ shipped 2026-08-10
+
+*Landed via branch `m5-viruses`, sequenced after M4 (a pop is a forced split; feeding
+consumes ejected mass). A pop is a real meal — the cell-vs-cell gates aimed at a virus,
+recorded as an EatEvent — followed by a burst through the same shared split tail as M4
+(`merge_cooldown_for`/`spawn_split_piece`, so the mass-scaled-commitment rule cannot drift
+between the two), radial impulses at deterministic 2πk/N angles, no rng. Feed mass
+evaporates like eject's cost−carried difference; refill only ever adds. Safe spawn: bounded
+PRNG retries against threat cells via the grid, with tests that prove the retry count from
+the generator's own state. Spawn-protection ticks skipped as the spec allows. 11 tests + a
+replay extension over live pellet and virus fields.*
 
 - Virus population maintenance; pop rule: a sufficiently bigger cell overlapping a virus
   bursts into pieces (respecting the 16 cap — this is the anti-snowball mechanic).
@@ -156,7 +180,19 @@ eject travel distance independent of tick rate; the whole existing suite still g
 
 Explicitly optional before a first playtest — swap with M6 freely.
 
-## M6 — Interest management & snapshot scale  `core/sim` + `core/net`  (size: M–L)
+## M6 — Interest management & snapshot scale  `core/sim` + `core/net`  (size: M–L) — ✅ shipped 2026-08-10, re-scoped
+
+*Landed via branch `m6-interest` WITHOUT the delta-snapshot item: interest + per-peer
+budgeting + Hello/Goodbye shipped as protocol v3 (one bump, as this section demands);
+deltas and id compaction moved to a future M7, per the measured-need doctrine this section
+itself endorses — freezing a delta wire format before anything measures the need is how a
+wrong format calcifies. What shipped: `view_radius` zoom curve + `collect_visible` over the
+grid (differential-tested), nearest-first fill within `snapshot_chunks_per_tick` × 91
+records per peer, half-open sessions until a valid Hello, and symmetric version refusal at
+last (`Goodbye{VersionMismatch}`). Measured effect: 523.6 → ~12.9 kB/s per peer on a
+2-player 2000-pellet world (~40×), hard-capped at 71.4 kB/s regardless of world size — the
+full-world-broadcast cliff is retired. Hello timeout deferred (ENet's own connection
+timeout covers the pathological case).*
 
 **Goal:** per-player snapshots that stay inside bandwidth as the world fills up.
 
