@@ -63,9 +63,23 @@ void apply_chunk(SnapshotView& view, const blob::net::SnapshotHeader& header,
     // benign on the unreliable channel, the newer state already superseded it.
 }
 
+/// The refusal reasons, spelled for a human reading the console.
+[[nodiscard]] const char* goodbye_reason_name(blob::net::GoodbyeReason reason) noexcept
+{
+    switch (reason) {
+    case blob::net::GoodbyeReason::VersionMismatch: return "protocol version mismatch";
+    case blob::net::GoodbyeReason::ServerFull:      return "server is full";
+    case blob::net::GoodbyeReason::Shutdown:        return "server shutting down";
+    }
+    return "unknown";   // unreachable: read_goodbye rejects unknown reasons
+}
+
 /// Blocks (servicing ENet) until the Welcome arrives on Control, the server
-/// rejects us, or the deadline passes. Returns nullopt after printing why.
-std::optional<blob::net::WelcomePayload> await_welcome(ENetHost* host)
+/// rejects us, or the deadline passes. Sends the Hello the moment the
+/// transport comes up — the server will not spawn us, let alone Welcome us,
+/// until it has checked our version. Returns nullopt after printing why.
+std::optional<blob::net::WelcomePayload> await_welcome(ENetHost* host, ENetPeer* server,
+                                                       std::string_view nickname)
 {
     const auto deadline = steady_clock::now() + std::chrono::seconds{5};
     while (steady_clock::now() < deadline) {
@@ -74,17 +88,41 @@ std::optional<blob::net::WelcomePayload> await_welcome(ENetHost* host)
             continue;
         }
         switch (event.type) {
-        case ENET_EVENT_TYPE_CONNECT:
-            break;   // transport is up; the Welcome follows on Control
+        case ENET_EVENT_TYPE_CONNECT: {
+            // Transport is up: introduce ourselves. Hello is session state —
+            // reliable Control (invariant 5) — and carries our version so the
+            // server can refuse a mismatch before spending anything on us.
+            std::array<std::byte,
+                       blob::net::hello_header_bytes + blob::net::max_hello_name_bytes>
+                                  buffer{};
+            blob::net::ByteWriter writer{.buffer = buffer};
+            blob::net::write_hello(writer, blob::net::protocol_version, nickname);
+            const std::span<const std::byte> bytes = blob::net::written(writer);
+            ENetPacket* packet =
+                enet_packet_create(bytes.data(), bytes.size(), ENET_PACKET_FLAG_RELIABLE);
+            enet_peer_send(server, static_cast<enet_uint8>(blob::net::Channel::Control), packet);
+            break;   // now the Welcome (or a Goodbye refusing us) follows
+        }
         case ENET_EVENT_TYPE_RECEIVE: {
-            blob::net::ByteReader reader{
-                .buffer = {reinterpret_cast<const std::byte*>(event.packet->data),
-                           event.packet->dataLength}};
+            const std::span<const std::byte> data{
+                reinterpret_cast<const std::byte*>(event.packet->data),
+                event.packet->dataLength};
+            blob::net::ByteReader reader{.buffer = data};
             const std::optional<blob::net::WelcomePayload> welcome =
                 blob::net::read_welcome(reader);
-            enet_packet_destroy(event.packet);
             if (welcome) {
+                enet_packet_destroy(event.packet);
                 return welcome;
+            }
+            // A Goodbye instead of a Welcome is the server refusing us — say
+            // why rather than letting the disconnect look like a dead server.
+            blob::net::ByteReader goodbye_reader{.buffer = data};
+            const std::optional<blob::net::GoodbyeReason> goodbye =
+                blob::net::read_goodbye(goodbye_reader);
+            enet_packet_destroy(event.packet);
+            if (goodbye) {
+                std::fprintf(stderr, "server refused us: %s\n", goodbye_reason_name(*goodbye));
+                return std::nullopt;
             }
             break;   // e.g. a snapshot chunk outracing the Welcome — keep waiting
         }
@@ -124,9 +162,18 @@ int main(int argc, char** argv)
         const char* const      last = arg.data() + arg.size();
         const auto [ptr, ec]        = std::from_chars(arg.data(), last, port);
         if (ec != std::errc{} || ptr != last) {
-            std::fprintf(stderr, "not a port: '%s'\nusage: blob-client [host] [port]\n", argv[2]);
+            std::fprintf(stderr, "not a port: '%s'\nusage: blob-client [host] [port] [nickname]\n",
+                         argv[2]);
             return 1;
         }
+    }
+    // Nickname for the Hello, truncated to the wire's byte cap here at the
+    // door — write_hello treats a longer name as misuse, and a UI decision
+    // like truncation belongs to the UI, not the codec. (Cutting mid-UTF-8
+    // sequence is possible and harmless: names are display-only.)
+    std::string_view nickname = argc > 3 ? argv[3] : "player";
+    if (nickname.size() > blob::net::max_hello_name_bytes) {
+        nickname = nickname.substr(0, blob::net::max_hello_name_bytes);
     }
 
     EnetGuard enet;
@@ -160,14 +207,15 @@ int main(int argc, char** argv)
     }
     std::printf("connecting to %s:%u...\n", host_name, port);
 
-    const std::optional<blob::net::WelcomePayload> welcome = await_welcome(client);
+    const std::optional<blob::net::WelcomePayload> welcome =
+        await_welcome(client, server, nickname);
     if (!welcome) {
         enet_peer_reset(server);
         enet_host_destroy(client);
         return 1;
     }
-    // The client is the refusing side of a version mismatch until M6 adds the
-    // Hello payload and lets the server refuse first.
+    // Belt and braces: the server refuses a mismatch first (our Hello carries
+    // the version), but a Welcome that slipped through still gets checked.
     if (welcome->version != blob::net::protocol_version) {
         std::fprintf(stderr, "protocol mismatch: server speaks v%u, this client speaks v%u\n",
                      welcome->version, blob::net::protocol_version);
@@ -218,13 +266,26 @@ int main(int argc, char** argv)
         while (enet_host_service(client, &event, 0) > 0) {
             switch (event.type) {
             case ENET_EVENT_TYPE_RECEIVE: {
-                blob::net::ByteReader reader{
-                    .buffer = {reinterpret_cast<const std::byte*>(event.packet->data),
-                               event.packet->dataLength}};
+                const std::span<const std::byte> data{
+                    reinterpret_cast<const std::byte*>(event.packet->data),
+                    event.packet->dataLength};
+                blob::net::ByteReader reader{.buffer = data};
                 std::array<blob::net::EntityRecord, blob::net::max_entities_per_chunk> chunk{};
                 if (const std::optional<blob::net::SnapshotHeader> header =
                         blob::net::read_snapshot(reader, chunk)) {
                     apply_chunk(view, *header, std::span{chunk}.first(header->count));
+                } else {
+                    // The only other server->client message mid-game is a
+                    // Goodbye on Control (e.g. Shutdown): print why and leave
+                    // cleanly instead of waiting out the dead connection.
+                    blob::net::ByteReader goodbye_reader{.buffer = data};
+                    if (const std::optional<blob::net::GoodbyeReason> goodbye =
+                            blob::net::read_goodbye(goodbye_reader)) {
+                        std::fprintf(stderr, "server said goodbye: %s\n",
+                                     goodbye_reason_name(*goodbye));
+                        server_gone = true;   // the server is done with us
+                        window.close();
+                    }
                 }
                 enet_packet_destroy(event.packet);   // always — decoded or not
                 break;

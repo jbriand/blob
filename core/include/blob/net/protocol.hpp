@@ -1,16 +1,19 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string_view>
 
 namespace blob::net {
 
-/// Bumped whenever the packing of any message changes. The check is one-way
-/// today: Welcome carries the server's version and the client refuses on a
-/// mismatch; symmetric refusal waits for M6's Hello payload.
-inline constexpr std::uint16_t protocol_version = 2;   // 2: snapshot messages (M1)
+/// Bumped whenever the packing of any message changes. Refusal is symmetric
+/// since v3: Hello carries the client's version (the server answers a mismatch
+/// with Goodbye{VersionMismatch}), Welcome carries the server's (the client
+/// still refuses belt-and-braces).
+inline constexpr std::uint16_t protocol_version = 3;   // 3: Hello payload + Goodbye reasons (M6)
 
 enum class MessageId : std::uint8_t {
     // client -> server
@@ -46,6 +49,34 @@ struct WelcomePayload {
     std::uint16_t world_extent{};   ///< square world side, in world units
     std::uint8_t  tick_rate{};      ///< server ticks per second
 };
+
+/// Hard cap on the nickname a Hello may carry, in bytes (UTF-8, so up to 16
+/// ASCII characters — display-only, the sim never sees names).
+inline constexpr std::size_t max_hello_name_bytes = 16;
+
+/// MessageId u8 + version u16 + name_len u8 — the fixed prefix of a Hello;
+/// the name bytes (≤ max_hello_name_bytes) follow.
+inline constexpr std::size_t hello_header_bytes = 4;
+
+/// The client's introduction, first thing after connect. Carries the version
+/// so the server can refuse a mismatch before spawning anything. The name is
+/// a fixed array, not a string: codecs never allocate (invariant 7's spirit).
+struct HelloPayload {
+    std::uint16_t version{protocol_version};
+    std::uint8_t  name_len{};   ///< how many leading bytes of `name` are meaningful
+    std::array<char, max_hello_name_bytes> name{};   ///< UTF-8, not NUL-terminated
+};
+
+/// Why the server is dropping a peer. Wire values are explicit and 0 is
+/// deliberately unused, so a zeroed buffer never decodes as a valid reason.
+enum class GoodbyeReason : std::uint8_t {
+    VersionMismatch = 1,   ///< Hello version != protocol_version
+    ServerFull      = 2,   ///< no free session slot
+    Shutdown        = 3,   ///< orderly server exit
+};
+
+/// MessageId u8 + reason u8.
+inline constexpr std::size_t goodbye_bytes = 2;
 
 // ---------------------------------------------------------------------------
 // Snapshot wire format. net describes the wire, not the simulation, so these
@@ -149,8 +180,23 @@ struct ByteReader {
 void write_input(ByteWriter& w, const InputCommand& cmd) noexcept;
 [[nodiscard]] std::optional<InputCommand> read_input(ByteReader& r) noexcept;
 
+/// A name longer than max_hello_name_bytes is caller misuse — the overflow
+/// flag is set and nothing at all is written (mirrors write_snapshot's
+/// oversized-span rule). Truncation is the caller's decision, never the codec's.
+void write_hello(ByteWriter& w, std::uint16_t version, std::string_view name) noexcept;
+
+/// Rejects a wrong MessageId, a name_len over max_hello_name_bytes, and a
+/// name_len claiming bytes the buffer does not contain.
+[[nodiscard]] std::optional<HelloPayload> read_hello(ByteReader& r) noexcept;
+
 void write_welcome(ByteWriter& w, const WelcomePayload& payload) noexcept;
 [[nodiscard]] std::optional<WelcomePayload> read_welcome(ByteReader& r) noexcept;
+
+void write_goodbye(ByteWriter& w, GoodbyeReason reason) noexcept;
+
+/// Rejects a wrong MessageId and any reason byte outside the named values —
+/// an unknown reason is malformed wire data, not a "misc" bucket.
+[[nodiscard]] std::optional<GoodbyeReason> read_goodbye(ByteReader& r) noexcept;
 
 void write_entity_record(ByteWriter& w, const EntityRecord& record) noexcept;
 /// Rejects kind >= entity_kind_count.
