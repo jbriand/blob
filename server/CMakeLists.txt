@@ -7,6 +7,8 @@
 add_executable(blob_server
     src/main.cpp
     src/config.cpp
+    src/session.cpp
+    src/snapshot_encode.cpp
     src/tick_loop.cpp
 )
 
