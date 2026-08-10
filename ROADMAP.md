@@ -89,7 +89,19 @@ Tests: differential vs. brute force O(n²) on seeded random layouts (uniform + c
 boundary/corner cells, empty world; a visited-candidate-pair count bound so an accidental
 O(n²) regression fails loudly instead of just slowly.
 
-## M3 — Eating, deaths, pellets, mass decay  `core/sim`  (size: M–L)
+## M3 — Eating, deaths, pellets, mass decay  `core/sim`  (size: M–L) — ✅ shipped 2026-08-10
+
+*Landed via branch `m3-eating`, four refinements over the spec below: (1) `StepEvents` is a
+`World` field rather than a `step()` return — a return would have churned the signature a
+parallel server branch was calling, and data-over-plumbing matches the codebase doctrine;
+(2) compaction is stable `std::erase_if`, not swap-remove — the array is walked O(n) every
+tick anyway and stable order keeps determinism reasoning trivial; (3) `despawn_player` also
+erases the player's standing intent (a respawn under a recycled id must not inherit a ghost
+cursor); (4) pellet respawn runs inside the same step as the eat, so restoration is
+immediate. Two grid rebuilds per step (post-integrate for eat queries, post-compact for the
+standing contract). The server consumed it the same day: `spawn_player` on connect,
+`despawn_player` on disconnect, per-step deaths → instant respawn. 14 new tests including
+200-tick exact-equality replay determinism.*
 
 **Goal:** the core loop of the genre — eat to grow, die when eaten.
 

@@ -123,6 +123,21 @@ entity counts and need neither `mass` nor `owner` fields at all — with
 byte-ranged `√mass` as the fallback after that. Either change bumps
 `protocol_version`.
 
+## Playing it
+
+```powershell
+# terminal 1 — the server (optionally drop a blob-server.cfg next to it;
+# every key is documented in server/blob-server.cfg.example)
+build/windows-clang/bin/Debug/blob-server.exe
+
+# terminals 2+ — one window per player
+build/windows-clang/bin/Debug/blob-client.exe 127.0.0.1 7777
+```
+
+The cursor steers. Eat pellets and smaller players to grow; get eaten and you
+respawn instantly. Esc quits. Rendering is the raw 20 Hz snapshot stream —
+interpolation is the next client iteration.
+
 ## What's actually implemented
 
 Enough to compile, link, run and test — not enough to play.
@@ -134,20 +149,28 @@ Enough to compile, link, run and test — not enough to play.
   snapshot codec (protocol v2): 13 B entity records in self-contained chunks of
   at most 91 against a 1200 B soft MTU. net is standalone — wire types are raw
   integers; the `sim::EntityKind` mirror is asserted where the tests link both.
-- `core/sim` — `World` with a frame-rate-independent `step(world, dt)`,
-  mass-dependent speed, entity kinds; every gameplay constant lives in the
-  `Tuning` aggregate (data, so a server config file can override it later);
-  uniform CSR `SpatialGrid` rebuilt each step, with circle and candidate-pair
-  queries. Collision and split/merge are `TODO`.
-- `server` — fixed-timestep `TickLoop` with a catch-up clamp, ENet host that
-  drains the socket before each tick and sleeps inside `enet_host_service` so a
-  packet can wake it early.
-- `client` — SFML 3 window, cursor → quantized intent, one placeholder circle.
-- 51 GoogleTest cases across two targets — `blob_core_tests` (label `core`) and
-  `blob_server_tests` (label `server`) — including a frame-rate-independence
-  check on `step`, differential grid tests against brute force with an O(n²)
-  tripwire, exhaustive snapshot-truncation rejection, and a catch-up-clamp
-  check on the tick loop.
+- `core/sim` — `World` with a frame-rate-independent `step(world, dt)`:
+  mass-dependent speed, eating (ratio + centre-depth gates), player deaths,
+  a self-restoring pellet field from an injected seeded PRNG, exponential
+  mass decay, and `spawn_player`/`despawn_player`. Every gameplay constant
+  lives in the `Tuning` aggregate (overridable by the server config file);
+  uniform CSR `SpatialGrid` rebuilt inside the step; `StepEvents` (eats,
+  deaths) exposed as a `World` field. Split/eject and merge are M4.
+- `server` — fixed-timestep `TickLoop` with a catch-up clamp; config file
+  (pure parser, fail-loud line-numbered errors, wire-width validation);
+  sessions with a u16-wraparound sequence guard; Welcome on connect; Input
+  dequantized then re-normalized (the authoritative side sanitizes intent);
+  chunked snapshot broadcast on the unreliable channel; death → instant
+  respawn.
+- `client` — SFML 3 window that connects, version-checks the Welcome, streams
+  quantized intent at the server's tick rate, assembles chunked snapshots,
+  and renders the latest state with the camera on your cell.
+- 86 GoogleTest cases across two targets — `blob_core_tests` (label `core`)
+  and `blob_server_tests` (label `server`) — including a 200-tick
+  replay-determinism check with exact float equality, differential grid tests
+  with an O(n²) tripwire, exhaustive snapshot-truncation rejection, and a
+  one-process real-UDP loopback test of the whole connect → Welcome → Input
+  → step → snapshot → decode chain.
 
 Data types here are plain structs and the operations on them are free functions
 taking the struct first — `step(world, dt)`, `write_u8(w, v)`, `pump(loop)` —
