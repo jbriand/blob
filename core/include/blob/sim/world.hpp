@@ -1,6 +1,7 @@
 #pragma once
 
 #include <blob/math/vec2.hpp>
+#include <blob/sim/spatial_grid.hpp>
 #include <blob/sim/tuning.hpp>
 
 #include <cstdint>
@@ -39,6 +40,7 @@ struct World {
     EntityId                  next_id{1};
     std::uint64_t             tick{};
     Tuning                    tuning{};   ///< single source for every gameplay constant (see tuning.hpp)
+    SpatialGrid               grid;       ///< broad phase, rebuilt by step() — derived scratch, never authoritative
 };
 
 /// Ids are monotonic and never reused, so nothing may hold an index across a

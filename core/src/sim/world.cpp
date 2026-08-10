@@ -1,5 +1,7 @@
 #include <blob/sim/world.hpp>
 
+#include <blob/sim/spatial_grid.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <type_traits>
@@ -66,9 +68,15 @@ void step(World& world, float dt)
         e.position.y = std::clamp(e.position.y, 0.0f, world.tuning.world_extent);
     }
 
-    // TODO(spatial): uniform grid rebuild + collision resolution goes here,
-    // before eat/split/merge. O(n^2) over thousands of pellets is fatal, so
-    // nothing broad-phase-free should ever land in this loop.
+    // 3. Broad phase over the post-integration positions. Everything moves
+    //    every tick, so a rebuild beats incremental maintenance; nothing
+    //    consumes the grid inside step() yet.
+    rebuild(world.grid, world.entities, world.tuning.world_extent,
+            world.tuning.grid_cell_size);
+
+    // TODO(collision): eat/overlap resolution goes here, off the grid only —
+    // for_each_candidate_pair / for_each_in_circle, never raw O(n^2)
+    // (invariant 6).
 
     ++world.tick;
 }

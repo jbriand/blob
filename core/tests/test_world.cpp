@@ -1,7 +1,10 @@
+#include <blob/sim/spatial_grid.hpp>
 #include <blob/sim/tuning.hpp>
 #include <blob/sim/world.hpp>
 
 #include <gtest/gtest.h>
+
+#include <cstdint>
 
 namespace sim = blob::sim;
 
@@ -87,6 +90,28 @@ TEST(World, IdsAreMonotonicAndStartAtOne)
     EXPECT_EQ(first, 1u);
     EXPECT_EQ(second, 2u);
     EXPECT_EQ(w.entities.size(), 2u);
+}
+
+TEST(World, StepRebuildsTheGridOverCurrentPositions)
+{
+    // The M2 wiring check: after a step, the world's own grid answers
+    // queries about where entities are *now* (post-integration), so the
+    // broad phase M3 builds on is already in place.
+    sim::World w;
+    sim::spawn(w, sim::EntityKind::Cell, {1234.0f, 5678.0f}, 10.0f, /*owner=*/1);
+    sim::apply_intent(w, sim::PlayerIntent{.player = 1, .direction = {1.0f, 0.0f}});
+    sim::step(w, sim::tick_dt(w.tuning));
+
+    const blob::math::Vec2 pos = w.entities.front().position;
+    int hits = 0;
+    std::uint32_t found = 0xffffffffu;
+    sim::for_each_in_circle(w.grid, pos, 1.0f,
+                            [&](std::uint32_t index, blob::math::Vec2) {
+                                found = index;
+                                ++hits;
+                            });
+    EXPECT_EQ(hits, 1);
+    EXPECT_EQ(found, 0u);   // entry indices are positions in world.entities
 }
 
 TEST(Tuning, DefaultsAreSane)
