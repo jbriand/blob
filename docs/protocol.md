@@ -10,24 +10,26 @@ the format cannot exist.
 
 ## Version policy
 
-`protocol_version` is currently **2** (2: the M1 snapshot family). Any packing change —
-field added, width changed, encoding changed, `EntityKind` extended — bumps it; wire
-changes within one iteration batch into a single bump. The test
-`Snapshot.ProtocolVersionPinnedAtTwo` re-pins the literal so an accidental format change
+`protocol_version` is currently **3** (2: the M1 snapshot family; 3: the Hello payload +
+Goodbye reasons — M6's wire changes, batched into one bump). Any packing change — field
+added, width changed, encoding changed, `EntityKind` extended — bumps it; wire changes
+within one iteration batch into a single bump. The test
+`Snapshot.ProtocolVersionPinnedAtThree` re-pins the literal so an accidental format change
 fails loudly and a deliberate one is re-pinned consciously.
 
-The check is **one-way today**: Welcome carries the server's version, and the *client*
-refuses on mismatch (prints both versions, disconnects). The server cannot refuse a
-too-old client yet because the client sends no version — symmetric refusal arrives with
-M6's Hello payload. (Beware the comment in `protocol.hpp` that says both sides refuse:
-the code is client-side only.)
+Refusal is **symmetric since v3**. Hello carries the client's version, and the *server*
+refuses a mismatch first — a reliable `Goodbye{VersionMismatch}`, then the hang-up, before
+spawning anything ([session flow](#session-flow)). Welcome still carries the server's
+version and the client still checks it on arrival, belt-and-braces: a Welcome that somehow
+slipped past a mismatched handshake is caught one step later. (Before v3 the check was
+client-side only — the client sent no version, so the server had nothing to judge.)
 
 ## Channels
 
 | Channel | Value | ENet mode | Carries | Why |
 |---|---|---|---|---|
-| `Control` | 0 | reliable, ordered (`ENET_PACKET_FLAG_RELIABLE`) | Welcome (M6: Hello, Goodbye) | session state must arrive, in order |
-| `Snapshot` | 1 | unreliable sequenced (flags 0) | Snapshot chunks **and** Input | the 20 Hz firehose — a dropped snapshot is always better than a late one (invariant 5) |
+| `Control` | 0 | reliable, ordered (`ENET_PACKET_FLAG_RELIABLE`) | Hello ↑, Welcome ↓, Goodbye ↓ | session state must arrive, in order |
+| `Snapshot` | 1 | unreliable sequenced (flags 0) | Snapshot chunks ↓ **and** Input ↑ | the 20 Hz firehose — a dropped snapshot is always better than a late one (invariant 5) |
 
 Invariant 5's rationale: a snapshot is absolute state that the next tick supersedes, so
 retransmitting a lost one delivers stale data late and delays everything behind it.
@@ -45,11 +47,34 @@ client's own latest-tick guard makes the same call one layer up.
 
 | Id | Byte | Direction | Size | Codec |
 |---|---|---|---|---|
-| `Hello` | `0x01` | client → server | — | declared; no codec until M6 |
+| `Hello` | `0x01` | client → server | 4 + n B (n = name bytes, ≤ 16) | `write_hello` / `read_hello` |
 | `Input` | `0x02` | client → server | 6 B | `write_input` / `read_input` |
 | `Welcome` | `0x81` | server → client | 8 B | `write_welcome` / `read_welcome` |
 | `Snapshot` | `0x82` | server → client | 7 + n·13 B | `write_snapshot` / `read_snapshot` |
-| `Goodbye` | `0x83` | server → client | — | declared; no codec until M6 |
+| `Goodbye` | `0x83` | server → client | 2 B | `write_goodbye` / `read_goodbye` |
+
+### Hello — 4 + n bytes
+
+The client's introduction, sent reliably on channel 0 the moment the transport comes up:
+the version the server will judge, plus a display-only nickname (the sim never sees
+names).
+
+| Offset | Field | Type | Encoding |
+|---|---|---|---|
+| 0 | message id | u8 | `0x01` |
+| 1 | `version` | u16 | the client's `protocol_version`; the server refuses a mismatch |
+| 3 | `name_len` | u8 | name bytes that follow; ≤ `max_hello_name_bytes` = 16 |
+| 4 | `name` | n × u8 | UTF-8, **not** NUL-terminated |
+
+Length discipline is split between the sides on purpose. `write_hello` treats a name over
+16 bytes as **flagged misuse** — the overflow flag goes up and nothing at all is written,
+mirroring `write_snapshot`'s oversized-span rule — because truncation is a UI decision,
+never the codec's (the client truncates at the door before calling, and cutting
+mid-UTF-8-sequence is harmless for a display-only string). `read_hello` rejects a
+`name_len` over the cap (it cannot come from `write_hello`) **and** a `name_len` claiming
+bytes the buffer does not contain, before copying anything. `HelloPayload` carries the
+name as a fixed `std::array<char, 16>`, not a `std::string` — codecs never allocate
+(invariant 7's spirit).
 
 ### Input — 6 bytes
 
@@ -61,12 +86,17 @@ client's own latest-tick guard makes the same call one layer up.
 | 4 | `dir_y` | i8 | `quantize_direction` |
 | 5 | flags | u8 | bit 0 = `split`, bit 1 = `eject`, rest ignored |
 
+The flags are **edges, not levels**: the client sets them on a key-press only (one press
+rides exactly one Input), and the server OR-latches them per session so a press cannot be
+erased by later steering-only Inputs — one press, one action, however the datagrams
+interleave ([architecture.md](architecture.md#the-server-loop)).
+
 ### Welcome — 8 bytes
 
 | Offset | Field | Type | Encoding |
 |---|---|---|---|
 | 0 | message id | u8 | `0x81` |
-| 1 | `version` | u16 | `protocol_version`; client refuses on mismatch |
+| 1 | `version` | u16 | the server's `protocol_version`; the client's belt-and-braces check |
 | 3 | `player_id` | u16 | never 0 |
 | 5 | `world_extent` | u16 | whole world units; the client's dequantization denominator |
 | 7 | `tick_rate` | u8 | Hz; the client's input-send cadence |
@@ -74,6 +104,23 @@ client's own latest-tick guard makes the same call one layer up.
 The config validator pins these widths at the source: `tick_rate` must sit in [1, 255]
 and `world_extent` in (0, 65535] or the server refuses to start — anything else would
 silently truncate here.
+
+### Goodbye — 2 bytes
+
+Why the server is dropping the peer, sent reliably on channel 0 before the hang-up
+(`enet_peer_disconnect_later`, so the reason actually flushes before the teardown).
+
+| Offset | Field | Type | Encoding |
+|---|---|---|---|
+| 0 | message id | u8 | `0x83` |
+| 1 | `reason` | u8 | 1 = `VersionMismatch`, 2 = `ServerFull`, 3 = `Shutdown` — **0 is deliberately unused** |
+
+Zero is not a reason so that a zeroed buffer can never decode as a valid Goodbye, and
+`read_goodbye` rejects by **whitelist, not range check** — an unknown byte is malformed
+wire data, never a "misc" bucket, and a reason removed from the enum some day starts being
+rejected without the check changing shape. Today the shipped server sends only
+`VersionMismatch`; `ServerFull` and `Shutdown` are wire-defined — and the client decodes
+and prints all three human-readably — but no server code path produces them yet.
 
 ### Snapshot chunk — 7 + n·13 bytes
 
@@ -117,7 +164,7 @@ one more record          = 7 + 92·13 = 1203 > 1200   ✗
 Both edges are pinned in `Snapshot.ChunkArithmeticFitsTheMtuBudget`. The shipped slicing is
 `for_each_chunk` in [`server/src/snapshot_encode.hpp`](../server/src/snapshot_encode.hpp):
 subspans of ≤ 91 in array order — 200 records make chunks of 91 + 91 + 18 — and **zero
-records make zero chunks** (an empty world is not worth a datagram, though a 7-byte empty
+records make zero chunks** (an empty view is not worth a datagram, though a 7-byte empty
 chunk is perfectly legal at the codec level and `Snapshot.EmptySnapshotIsLegalAndExactlySevenBytes`
 proves it).
 
@@ -131,8 +178,38 @@ the loopback test) is latest-tick-wins:
 
 Losing a chunk is benign **because records are absolute state**: partial application just
 means some entities are missing from one frame and pop back with the next snapshot, 50 ms
-later. There is no delta to corrupt — that trade changes when M6 introduces delta
-snapshots, which is why acks (`InputCommand::sequence`) are being laid down now.
+later. There is no delta to corrupt — that trade changes if delta snapshots ever land
+(deferred to M7, when measurements demand them; `InputCommand::sequence` is the ack
+groundwork already in place).
+
+## Per-peer sending
+
+Since M6 the server does not broadcast: **each peer gets its own snapshot**, cut to what
+that player can see ([`server/src/main.cpp`](../server/src/main.cpp) +
+[`snapshot_encode.cpp`](../server/src/snapshot_encode.cpp)). Per session, per send:
+
+1. **View centre** = the mass-weighted centroid of the player's cells (held from the last
+   send while the player briefly has none, mid-respawn).
+2. **View radius** = `view_base + view_mass_factor·√(total cell mass)` — the zoom curve,
+   derived in [simulation-math.md](simulation-math.md#the-zoom-curve).
+3. **Visible set** = everything within that circle, answered by the grid
+   (`sim::collect_visible`), then encoded — unless it exceeds the budget:
+4. **Budget** = `snapshot_chunks_per_tick × max_entities_per_chunk` records (default
+   3 × 91 = **273**). An over-budget view keeps exactly the **nearest** entities — sort key
+   (dist² to centre, then index ascending), a fully deterministic order, because what a
+   peer receives must be a pure function of the world, never of allocator or hash
+   accidents (`SnapshotEncode.OverBudgetKeepsExactlyTheNearestRecords`,
+   `…BudgetDistanceTiesBreakOnIndexAscending`, `…PerPeerSelectionIsDeterministic`). The far
+   rim of the view is the part whose absence a player notices least.
+
+The budget lives in **`ServerConfig`, not `Tuning`** — it is operational (like `port`), not
+gameplay: it shapes datagram spend per peer, never what the simulation does, so it has no
+business in the replayed-input aggregate. The point of the cap is that one crowded view
+cannot monopolize the uplink: worst case per peer is 3 × 1190 B × 20 Hz = **71.4 kB/s**
+regardless of world size. Measured effect on a 2-player 2000-pellet world: full-world
+broadcast cost 523.6 kB/s per peer; a spawn-sized view costs ~12.9 kB/s — about 40× less —
+and the full-world-broadcast cliff is retired. Peers that have not completed the Hello
+handshake get no snapshots at all ([session flow](#session-flow)).
 
 ## Robustness contract
 
@@ -143,27 +220,33 @@ pinned by a test in [`core/tests/test_snapshot.cpp`](../core/tests/test_snapshot
 
 | Malformation | Result | Test |
 |---|---|---|
-| wrong message-id byte | nullopt | `Snapshot.WrongMessageIdIsRejected` |
-| truncation anywhere — all 46 proper prefixes of a 3-record chunk | nullopt | `Snapshot.EveryTruncationIsRejectedNotGuessed` |
+| wrong message-id byte | nullopt | `Snapshot.WrongMessageIdIsRejected`, `Hello.WrongMessageIdIsRejected`, `Goodbye.TruncationAndWrongMessageIdAreRejected` |
+| truncation anywhere — every proper prefix of a 3-record chunk (46), an 11-byte Hello, a Goodbye | nullopt | `Snapshot.EveryTruncationIsRejectedNotGuessed`, `Hello.EveryTruncationIsRejectedNotGuessed`, `Goodbye.TruncationAndWrongMessageIdAreRejected` |
 | garbage kind (≥ 4) | nullopt | `Snapshot.OutOfRangeKindIsRejected` |
 | count claiming records the bytes don't contain | nullopt | `Snapshot.CountLyingBeyondTheBytesIsRejected` |
 | count > 91, even with the records genuinely present | nullopt | `Snapshot.CountAboveChunkLimitIsRejected` |
 | count > caller's `out` span | nullopt — reject, never spill | `Snapshot.UndersizedOutSpanIsRejected` |
+| `name_len` > 16, even with the bytes genuinely present | nullopt | `Hello.NameLengthAboveTheCapIsRejectedEvenWithTheBytesPresent` |
+| `name_len` claiming bytes the buffer doesn't contain | nullopt | `Hello.EveryTruncationIsRejectedNotGuessed` |
+| Goodbye reason outside {1, 2, 3} — including 0, the zeroed-buffer trap | nullopt | `Goodbye.UnknownReasonIsRejected` |
 | writer out of room | flag; a straddling write lands what fits, nothing past the end | `Snapshot.WriterOverflowSetsFlagInsteadOfScribbling` |
 | `write_snapshot` span > 91 records | **flagged misuse, nothing written at all** — the check runs before the first byte | `Snapshot.OversizedSpanIsFlaggedMisuseNotAScribble` |
+| `write_hello` name > 16 bytes | flagged misuse, nothing written — same rule | `Hello.OversizedNameIsFlaggedMisuseNotTruncated` |
 | corrupted public cursor (`offset` = SIZE_MAX) | flag, no wrap, no stray access | `Protocol.MaximalOffsetCannotWrapPastTheBoundsCheck` |
 
 On success, `read_snapshot` fills the first `count` entries of `out` and returns the
 header. The `offset >= size` bounds-check idiom that makes the last row work is explained
 in [data-structures.md](data-structures.md#bytewriter--bytereader). The server's stance on
-a rejected packet is *drop and move on* — malformed wire data is never fatal.
+a rejected packet is *drop and move on* — malformed wire data is never fatal, and on a
+half-open session (no Hello yet) everything that is not a valid Hello is dropped the same
+way.
 
 ## Quantization
 
-The snapshot stream is the bandwidth bill — every entity × 20 Hz × every peer — so every
-field crossing the wire is quantized, and **wire values are display-only**: the server
-keeps the authoritative floats and resolves all gameplay against them, so quantization
-error is a rendering concern, never a correctness one. (The README's
+The snapshot stream is the bandwidth bill — every visible entity × 20 Hz × every peer — so
+every field crossing the wire is quantized, and **wire values are display-only**: the
+server keeps the authoritative floats and resolves all gameplay against them, so
+quantization error is a rendering concern, never a correctness one. (The README's
 [Quantization section](../README.md#quantization) tells the same story with the full
 mass-encoding rationale.)
 
@@ -219,28 +302,43 @@ the circle ahead of `b`?". Edge cases, all pinned in
 
 ## Session flow
 
+The handshake is **half-open until a valid Hello**: connect buys a session slot and
+nothing else — no spawn, no Welcome, no snapshots — because the version check must pass
+before the world spends anything on the peer. A client that never says Hello is reaped by
+ENet's own connection timeout (a dedicated Hello deadline is a known simplification,
+deferred until it is a measured problem).
+
 ```mermaid
 sequenceDiagram
     participant C as client
     participant S as server
     C->>S: ENet connect
-    Note over S: PlayerId = next_player_id++<br/>add_session, spawn_player
-    S->>C: Welcome v2 — player_id, extent, tick_rate (ch 0, reliable)
-    Note over C: version != 2 -> print and disconnect
-    loop every 1/tick_rate s (accumulator-paced)
-        C--)S: Input seq n (ch 1, unreliable, 6 B)
-        Note over S: read_input, sequence guard,<br/>dequantize + re-normalize, apply_intent
+    Note over S: PlayerId = next_player_id++<br/>add_session — half-open:<br/>no spawn, no Welcome yet
+    C->>S: Hello v3 — version, nickname (ch 0, reliable, 4-20 B)
+    alt version matches
+        Note over S: store nickname, spawn_player
+        S->>C: Welcome v3 — player_id, extent, tick_rate (ch 0, reliable)
+        loop every 1/tick_rate s (accumulator-paced)
+            C--)S: Input seq n (ch 1, unreliable, 6 B)
+            Note over S: read_input, sequence guard,<br/>dequantize + re-normalize,<br/>OR-latch split/eject, apply_intent
+        end
+        loop every server tick (once per loop iteration)
+            S--)C: Snapshot chunk tick T, count k (ch 1, unreliable, per-peer visible set)
+            S--)C: ... more chunks, same tick, up to 91 records each
+            Note over C: newer tick replaces, equal appends, older drops
+        end
+        C->>S: ENet disconnect
+        Note over S: remove_session, despawn_player<br/>(disconnect is not death - no event)
+    else version mismatch
+        S->>C: Goodbye reason VersionMismatch (ch 0, reliable, 2 B)
+        Note over S: disconnect_later - the reason<br/>flushes before the teardown;<br/>the refused peer never spawned
+        Note over C: print the reason, exit
     end
-    loop every server tick (once per loop iteration)
-        S--)C: Snapshot chunk tick T, count k (ch 1, unreliable)
-        S--)C: ... more chunks, same tick, up to 91 records each
-        Note over C: newer tick replaces, equal appends, older drops
-    end
-    C->>S: ENet disconnect
-    Note over S: remove_session, despawn_player<br/>(disconnect is not death - no event)
 ```
 
-The whole chain — connect → Welcome → Input → `apply_intent` → `step` → chunked broadcast →
-client decode, over a real UDP socket on 127.0.0.1 — is exercised end-to-end by
-`Loopback.CursorChaseOverRealUdp` in
-[`server/tests/test_loopback.cpp`](../server/tests/test_loopback.cpp).
+Both arms run end-to-end over a real UDP socket on 127.0.0.1 in
+[`server/tests/test_loopback.cpp`](../server/tests/test_loopback.cpp):
+`Loopback.CursorChaseOverRealUdp` (connect → Hello → Welcome → Input → `apply_intent` →
+`step` → per-peer snapshot → client decode) and
+`Loopback.VersionMismatchIsRefusedWithGoodbye` (the refusal, the flush-before-hang-up, and
+that a refused peer never spawns).
