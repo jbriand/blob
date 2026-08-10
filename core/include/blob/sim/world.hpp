@@ -36,6 +36,15 @@ struct Entity {
     /// at exactly 0.0f — which is what the merge gate tests. Server-side
     /// only, like `impulse`.
     float       merge_cooldown{};
+    /// Ejected-mass hits this Virus has absorbed since its last feed-split
+    /// (meaningful only while kind == Virus; reset to 0 by the split).
+    /// Server-side only, like `impulse` — feed state never crosses the wire
+    /// (`EntityRecord` and `protocol_version` are untouched by M5).
+    std::uint8_t feed_count{};
+    /// Direction of the most recent feed — the launch direction of the
+    /// split a full feed_count fires, so the last feeder aims the virus.
+    /// Same server-side-only rule as `feed_count`.
+    math::Vec2  last_feed_dir{};
     /// Marked by eat resolution (and same-owner merges) inside step() and
     /// compacted away before the step returns — never true between steps,
     /// so it never crosses the wire (`EntityRecord` and `protocol_version`
@@ -81,8 +90,8 @@ struct World {
 
     /// The injected PRNG invariant 3 demands (no global RNG). The seed is
     /// part of the replayed input — same seed + same call sequence gives an
-    /// identical world — and every consumer (pellet respawn, spawn_player)
-    /// draws from here and nowhere else.
+    /// identical world — and every consumer (pellet and virus respawn,
+    /// spawn_player) draws from here and nowhere else.
     std::mt19937              rng;
 
     StepEvents                events;     ///< what the last step() did (see StepEvents)
@@ -113,10 +122,14 @@ EntityId spawn(World& world, EntityKind kind, math::Vec2 position, float mass,
 /// Upserts the latest intent for that player: one intent per player per tick.
 void apply_intent(World& world, const PlayerIntent& intent);
 
-/// One starting Cell of `spawn_mass` at a PRNG position. Placement is naive —
-/// choosing a spot away from big cells is M5's safe-spawn job. Consumes
-/// world.rng, which makes lifecycle calls part of the deterministic input
-/// sequence: a replay must repeat them in the same order relative to step().
+/// One starting Cell of `spawn_mass`, placed by the M5 safe-spawn rule: up
+/// to safe_spawn_attempts PRNG draws, the first with no threat-sized Cell
+/// (mass >= safe_spawn_threat_mass) within safe_spawn_radius wins, and when
+/// nothing is safe the last draw stands. Threats are judged against the
+/// standing grid — the world as of the last step(). Consumes world.rng — a
+/// variable number of draws, but a pure function of world state — so
+/// lifecycle calls stay part of the deterministic input sequence: a replay
+/// must repeat them in the same order relative to step().
 EntityId spawn_player(World& world, PlayerId player);
 
 /// Removes everything the player owns, immediately, plus any pending intent.

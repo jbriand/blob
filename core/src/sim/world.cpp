@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
+#include <numbers>
 #include <type_traits>
 
 namespace blob::sim {
@@ -47,6 +48,29 @@ void collect_cell_owners(const World& world, std::vector<PlayerId>& out)
     out.erase(std::unique(out.begin(), out.end()), out.end());
 }
 
+/// The merge cooldown a piece of `piece_mass` carries out of any split.
+/// M4's player split and M5's pop burst share this one formula on purpose:
+/// the "mass-scaled commitment" rule must not be able to drift between them.
+[[nodiscard]] float merge_cooldown_for(const Tuning& tuning, float piece_mass) noexcept
+{
+    return tuning.merge_cooldown_base + tuning.merge_cooldown_per_mass * piece_mass;
+}
+
+/// Spawns one launched split piece: a Cell at `at` carrying `mass`, kicked
+/// along `impulse` and armed with the mass-scaled cooldown — the shared tail
+/// of M4's perform_split and M5's pop burst, so both arm pieces identically.
+/// Invalidates references into world.entities (spawn may reallocate).
+void spawn_split_piece(World& world, PlayerId owner, math::Vec2 at, float mass,
+                       math::Vec2 impulse)
+{
+    spawn(world, EntityKind::Cell, at, mass, owner);
+    Entity& piece = world.entities.back();
+    // The kick rides in `impulse`, not `velocity` — see the Entity field
+    // comment: intent overwrites velocity every tick.
+    piece.impulse        = impulse;
+    piece.merge_cooldown = merge_cooldown_for(world.tuning, mass);
+}
+
 /// One split action for one player. Iterates only the cells that existed
 /// before any splitting this tick (the pre-scan size bound): splitting
 /// appends, and a fresh half must never re-split off the same keypress.
@@ -74,19 +98,14 @@ void perform_split(World& world, const PlayerIntent& intent)
         // construction, not by tolerance.
         const float half = parent.mass * 0.5f;
         // Mass-scaled commitment on BOTH halves: big splits stay split longer.
-        const float cooldown = world.tuning.merge_cooldown_base +
-                               world.tuning.merge_cooldown_per_mass * half;
         parent.mass           = half;
-        parent.merge_cooldown = cooldown;
+        parent.merge_cooldown = merge_cooldown_for(world.tuning, half);
         const math::Vec2 at   = parent.position;
 
-        spawn(world, EntityKind::Cell, at, half, intent.player);   // `parent` dangles from here
-        Entity& child = world.entities.back();
-        // The kick rides in `impulse`, not `velocity` — see the Entity field
-        // comment. Zero intent means zero kick: the pair still splits, and
-        // same-owner push-apart provides the separation.
-        child.impulse        = intent.direction * world.tuning.split_impulse_speed;
-        child.merge_cooldown = cooldown;
+        // Zero intent means zero kick: the pair still splits, and same-owner
+        // push-apart provides the separation. (`parent` dangles from here.)
+        spawn_split_piece(world, intent.player, at, half,
+                          intent.direction * world.tuning.split_impulse_speed);
         ++live;
     }
 }
@@ -148,11 +167,61 @@ void resolve_actions(World& world)
     }
 }
 
+/// M5's pop burst: the cell at `eater_index` — which has just absorbed a
+/// virus — force-splits into N equal pieces, N = min(virus_pop_pieces,
+/// max_cells_per_player − owned + 1) with `owned` counted at burst time, so
+/// back-to-back pops in one tick shrink each other's bursts and the cap is
+/// never breached. At the cap N = 1: the mass lands and nothing splits (no
+/// cooldown is armed for a burst that never was) — the anti-snowball still
+/// bites everyone below cap. Reuses M4's split machinery (merge_cooldown_for
+/// + spawn_split_piece), and launches the N − 1 new pieces radially at
+/// 2πk/N from the +x axis — fixed, rng-free angles: a pop is already pure
+/// punishment, so its scatter should be readable and replayable, never a
+/// lottery (and invariant 3 stays untouched: no draw, no divergence).
+/// Invalidates references into world.entities (spawn may reallocate).
+void burst_cell(World& world, std::size_t eater_index)
+{
+    int owned = 0;
+    for (const Entity& e : world.entities) {
+        if (e.kind == EntityKind::Cell && e.owner == world.entities[eater_index].owner &&
+            !e.dead) {
+            ++owned;
+        }
+    }
+    const int n = std::min(world.tuning.virus_pop_pieces,
+                           world.tuning.max_cells_per_player - owned + 1);
+    if (n <= 1) {
+        return;   // at (or defensively past) the cap: the mass lands, nothing splits
+    }
+
+    // The post-gain mass divides equally; the original keeps piece 0's share
+    // in place. Every piece — original included — carries the mass-scaled
+    // merge cooldown, exactly like an action split's halves.
+    Entity&          cell  = world.entities[eater_index];
+    const float      share = cell.mass / static_cast<float>(n);
+    const math::Vec2 at    = cell.position;
+    const PlayerId   owner = cell.owner;
+    cell.mass           = share;
+    cell.merge_cooldown = merge_cooldown_for(world.tuning, share);
+    for (int k = 1; k < n; ++k) {   // `cell` dangles once the first piece spawns
+        const float frac  = static_cast<float>(k) / static_cast<float>(n);
+        const float angle = 2.0f * std::numbers::pi_v<float> * frac;
+        const math::Vec2 dir{std::cos(angle), std::sin(angle)};
+        spawn_split_piece(world, owner, at, share, dir * world.tuning.split_impulse_speed);
+    }
+}
+
 /// Eat resolution, against the grid built over this tick's positions. Marks
 /// victims dead and transfers mass; removal waits for compaction so entity
 /// indices stay aligned with the grid throughout the scan. Eaters run in
 /// array order — that *is* the tie-break rule, and since spawn order fixes
 /// array order, resolution is deterministic (invariant 3).
+///
+/// A pop burst appends entities mid-pass; the loop bound is snapshotted
+/// (exactly as the action phase snapshots before splitting), so fresh burst
+/// pieces are never iterated as eaters this tick — and they missed grid#1,
+/// so no query can hand them out as victims either: new pieces sit the rest
+/// of the tick out in both directions.
 void resolve_eating(World& world)
 {
     // Deaths are detected by difference: who owned an alive Cell before,
@@ -162,8 +231,7 @@ void resolve_eating(World& world)
 
     const std::size_t count = world.entities.size();
     for (std::size_t i = 0; i < count; ++i) {
-        Entity& eater = world.entities[i];
-        if (eater.kind != EntityKind::Cell || eater.dead) {
+        if (world.entities[i].kind != EntityKind::Cell || world.entities[i].dead) {
             continue;   // only live Cells eat; food and viruses never do
         }
 
@@ -172,23 +240,29 @@ void resolve_eating(World& world)
         // would be deterministic — this one just keeps one meal from
         // cascading into a longer reach within a single tick. The ratio gate
         // below *does* use live mass, so growth still counts there.
-        const float r_e = radius_for_mass(world.tuning, eater.mass);
+        const float r_e = radius_for_mass(world.tuning, world.entities[i].mass);
+        const math::Vec2 eater_at = world.entities[i].position;
 
         // Both eat rules imply centre distance <= r_e, so one circle query
         // covers them. It must be for_each_in_circle, not candidate pairs:
         // a big eater's reach exceeds grid_cell_size, and this query is the
         // documented big-eater path (invariant 6 — never a raw pair scan).
         for_each_in_circle(
-            world.grid, eater.position, r_e,
-            [&world, &eater, i, r_e](std::uint32_t index, math::Vec2) {
+            world.grid, eater_at, r_e,
+            [&world, i, r_e](std::uint32_t index, math::Vec2) {
                 if (static_cast<std::size_t>(index) == i) {
                     return;   // self
                 }
+                // Re-acquired on every entry, never held across one: a pop
+                // burst below appends entities and may reallocate the array,
+                // so a reference captured once would dangle mid-query.
+                Entity& eater = world.entities[i];
                 Entity& victim = world.entities[index];
                 if (victim.dead) {
                     return;   // already eaten earlier this tick
                 }
                 bool eaten = false;
+                bool pop = false;   // an eaten Virus additionally bursts the eater
                 switch (victim.kind) {
                 case EntityKind::Pellet:
                 case EntityKind::EjectedMass:
@@ -213,13 +287,32 @@ void resolve_eating(World& world)
                     }
                     break;
                 case EntityKind::Virus:
-                    break;   // inert until M5's pop rule
+                    // M5's pop rule: cell-vs-cell's two gates aimed at a
+                    // virus (viruses are unowned, so there is no owner
+                    // clause) — heavy enough AND deep enough. Below either
+                    // gate the virus is terrain: a small cell can sit on it
+                    // indefinitely and nothing whatsoever happens.
+                    if (eater.mass >= world.tuning.eat_ratio * victim.mass) {
+                        const float dist = math::length(victim.position - eater.position);
+                        const float r_v = radius_for_mass(world.tuning, victim.mass);
+                        eaten = pop = dist <= r_e - world.tuning.eat_depth_factor * r_v;
+                    }
+                    break;
                 }
                 if (eaten) {
                     victim.dead = true;
-                    eater.mass += victim.mass;   // mass moves, never vanishes
+                    eater.mass += victim.mass;   // mass moves, never vanishes —
+                                                 // a pop included: the virus's mass
+                                                 // lands before the burst divides it
                     world.events.eats.push_back(
                         EatEvent{.eater = eater.id, .eaten = victim.id});
+                    if (pop) {
+                        // A pop IS a meal — recorded above like any other,
+                        // so the layers above need no special case — and
+                        // then the burst. Last statement on purpose:
+                        // `eater`/`victim` dangle past this call.
+                        burst_cell(world, i);
+                    }
                 }
             });
     }
@@ -230,6 +323,71 @@ void resolve_eating(World& world)
     std::set_difference(world.owners_before_scratch.begin(), world.owners_before_scratch.end(),
                         world.owners_after_scratch.begin(), world.owners_after_scratch.end(),
                         std::back_inserter(world.events.deaths));
+}
+
+/// M5's feeding phase, right after eat resolution: every alive Virus absorbs
+/// the alive EjectedMass whose centres lie inside its radius (the circle
+/// query's inclusive boundary *is* the rule, same convention as food), and a
+/// full feed count fires a split toward the last feeder. Running after the
+/// eat pass means a cell racing a virus for the same pellet resolves to the
+/// cell — array-order eaters first — and a virus popped this tick no longer
+/// feeds. Consumed pellets are dead-marked with NO EatEvent: feeding is
+/// terraforming, not a meal — nothing above core should react to it — and
+/// the pellet's mass vanishes with it. The virus's own mass stays virus_mass
+/// throughout: absorbed feed mass evaporates, the same anti-mass-printing
+/// rule as eject.
+void feed_viruses(World& world)
+{
+    // Snapshotted bound, exactly like the action phase and the eat pass:
+    // feed-splits append, and a fresh virus must not feed (or be queried)
+    // on the tick of its birth — it missed grid#1 anyway.
+    const std::size_t count = world.entities.size();
+    for (std::size_t i = 0; i < count; ++i) {
+        if (world.entities[i].kind != EntityKind::Virus || world.entities[i].dead) {
+            continue;
+        }
+        const float      r_v = radius_for_mass(world.tuning, world.entities[i].mass);
+        const math::Vec2 at  = world.entities[i].position;
+        for_each_in_circle(
+            world.grid, at, r_v,
+            [&world, i](std::uint32_t index, math::Vec2) {
+                // Re-acquired on every entry, never held across one: a
+                // feed-split below appends entities and may reallocate the
+                // array, so a reference captured once would dangle.
+                Entity& virus = world.entities[i];
+                Entity& pellet = world.entities[index];
+                if (pellet.kind != EntityKind::EjectedMass || pellet.dead) {
+                    return;   // viruses eat only ejecta; eaten pellets are gone
+                }
+                pellet.dead = true;
+                ++virus.feed_count;
+                // Feed direction, a deterministic fallback chain (every
+                // branch is a pure function of state, invariant 3): the
+                // pellet's remaining flight while it still moves; the
+                // pellet→virus axis once it has come to rest; +x if the
+                // pellet sits exactly on the centre and neither exists.
+                math::Vec2 dir = math::normalized(pellet.velocity);
+                if (dir == math::Vec2{}) {
+                    dir = math::normalized(virus.position - pellet.position);
+                }
+                if (dir == math::Vec2{}) {
+                    dir = {1.0f, 0.0f};
+                }
+                virus.last_feed_dir = dir;
+                if (virus.feed_count >= world.tuning.virus_feed_count) {
+                    // The fed split: a NEW virus at the fed one's position,
+                    // launched along the last feed at eject speed — it
+                    // glides ~eject_speed/impulse_damping_rate ≈ 400 units,
+                    // the genre's fed-virus lunge. Both parties restart
+                    // their count (the newborn starts at zero by spawn).
+                    virus.feed_count = 0;
+                    const math::Vec2 kick = virus.last_feed_dir * world.tuning.eject_speed;
+                    spawn(world, EntityKind::Virus, virus.position,
+                          world.tuning.virus_mass);   // `virus`/`pellet` dangle from here
+                    world.entities.back().impulse = kick;
+                }
+            });
+    }
 }
 
 /// One same-owner pair. Merge is checked first: it is the stricter test, and
@@ -376,6 +534,28 @@ void respawn_pellets(World& world)
     }
 }
 
+/// Tops the virus field up to target, exactly like the pellet field and in
+/// the same phase (pellet draws first, then virus draws — a fixed order the
+/// replay depends on). Refill only ever ADDS: a feed-split can push the
+/// population above target, and the surplus stands — despawning to correct
+/// it would yank live terrain out from under the players hiding on it. Like
+/// fresh pellets, new viruses miss this step's grid and are indexed by the
+/// end-of-step rebuild; nothing can pop or feed them until the next tick.
+void respawn_viruses(World& world)
+{
+    int alive = 0;
+    for (const Entity& e : world.entities) {
+        if (e.kind == EntityKind::Virus && !e.dead) {
+            ++alive;
+        }
+    }
+    for (int k = alive; k < world.tuning.target_virus_count; ++k) {
+        const float x = rand_unit(world.rng) * world.tuning.world_extent;
+        const float y = rand_unit(world.rng) * world.tuning.world_extent;
+        spawn(world, EntityKind::Virus, {x, y}, world.tuning.virus_mass);
+    }
+}
+
 } // namespace
 
 World make_world(std::uint32_t seed)
@@ -410,6 +590,8 @@ EntityId spawn(World& world, EntityKind kind, math::Vec2 position, float mass, P
         .impulse = {},
         .mass = mass,
         .merge_cooldown = 0.0f,
+        .feed_count = 0,
+        .last_feed_dir = {},
         .dead = false,
     });
     return id;
@@ -427,12 +609,50 @@ void apply_intent(World& world, const PlayerIntent& intent)
 
 EntityId spawn_player(World& world, PlayerId player)
 {
-    // Naive placement anywhere in the square, big-cell danger ignored —
-    // safe-spawn is M5's job. The two draws consume world.rng, so lifecycle
-    // calls are part of the deterministic input sequence (see the header).
-    const float x = rand_unit(world.rng) * world.tuning.world_extent;
-    const float y = rand_unit(world.rng) * world.tuning.world_extent;
-    return spawn(world, EntityKind::Cell, {x, y}, world.tuning.spawn_mass, player);
+    // M5 safe spawn: up to safe_spawn_attempts draws, first safe one wins.
+    // "Safe" = no alive Cell at or above safe_spawn_threat_mass within
+    // safe_spawn_radius, answered by the standing grid — which describes the
+    // world as of the last step(), so a threat that moved since is judged
+    // one tick stale. Accepted and documented: placement is a comfort rule,
+    // not a correctness one, and the alternative is a mid-call rebuild.
+    //
+    // Draws stop at the first safe hit — each draw consumes world.rng only
+    // when actually made — so the draw count varies, but it is a pure
+    // function of world state (rng state + the last step's grid), and a
+    // replay therefore repeats the exact same sequence (invariant 3:
+    // lifecycle calls are part of the replayed input, see the header).
+    //
+    // When nothing is safe the LAST draw stands: bounded work by
+    // construction — never an infinite loop on a crowded map — and spawning
+    // into danger beats not spawning at all.
+    const int attempts = std::max(1, world.tuning.safe_spawn_attempts);   // 0 would place no one
+    math::Vec2 at{};
+    for (int attempt = 0; attempt < attempts; ++attempt) {
+        // Two named draws so the x-before-y order is explicit and replayable.
+        const float x = rand_unit(world.rng) * world.tuning.world_extent;
+        const float y = rand_unit(world.rng) * world.tuning.world_extent;
+        at = {x, y};
+        bool threatened = false;
+        for_each_in_circle(
+            world.grid, at, world.tuning.safe_spawn_radius,
+            [&world, &threatened](std::uint32_t index, math::Vec2) {
+                // The grid may be stale (see above): despawns since the last
+                // step shrink the array, so an out-of-range index is a legal
+                // wrong-but-defined answer here, skipped defensively.
+                if (static_cast<std::size_t>(index) >= world.entities.size()) {
+                    return;
+                }
+                const Entity& e = world.entities[index];
+                if (e.kind == EntityKind::Cell && !e.dead &&
+                    e.mass >= world.tuning.safe_spawn_threat_mass) {
+                    threatened = true;
+                }
+            });
+        if (!threatened) {
+            break;
+        }
+    }
+    return spawn(world, EntityKind::Cell, at, world.tuning.spawn_mass, player);
 }
 
 void despawn_player(World& world, PlayerId player)
@@ -508,30 +728,39 @@ void step(World& world, float dt)
             world.tuning.grid_cell_size);
 
     // 4. Eating — marks only, no removal, so indices stay aligned with (3).
+    //    Includes M5's pop rule, whose bursts append mid-pass (see
+    //    resolve_eating for why that is safe).
     resolve_eating(world);
 
-    // 5. Same-owner resolution (push-apart / merge), after eating so this
+    // 5. Virus feeding (M5), after eating — cells outrank viruses for a
+    //    contested pellet, and popped viruses no longer feed — and before
+    //    same-owner resolution, mirroring the eat pass it extends.
+    feed_viruses(world);
+
+    // 6. Same-owner resolution (push-apart / merge), after eating so this
     //    tick's meals are out of the running. All-pairs per player, NOT via
     //    the grid — see resolve_same_owner for why.
     resolve_same_owner(world);
 
-    // 6. Decay, dt-scaled (see apply_decay).
+    // 7. Decay, dt-scaled (see apply_decay).
     apply_decay(world, dt);
 
-    // 7. Pellet respawn, from the injected PRNG.
+    // 8. Pellet then virus respawn, from the injected PRNG in that fixed
+    //    draw order.
     respawn_pellets(world);
+    respawn_viruses(world);
 
-    // 8. Compact. std::erase_if is the stable O(n) walk; the ROADMAP sketched
+    // 9. Compact. std::erase_if is the stable O(n) walk; the ROADMAP sketched
     //    swap-remove, but this array is walked wholesale every tick anyway,
     //    so stability costs nothing extra and keeps spawn order — which is
     //    the eat-resolution order — intact across compactions.
     std::erase_if(world.entities, [](const Entity& e) { return e.dead; });
 
-    // 9. Rebuild over the *final* array: between-steps queries must see what
-    //    the world now contains (indices shifted in (8), pellets arrived in
-    //    (7)). Two O(n) rebuilds per tick is the obviously-correct choice
-    //    over cleverness about staleness — an optimization candidate, not
-    //    debt.
+    // 10. Rebuild over the *final* array: between-steps queries must see what
+    //    the world now contains (indices shifted in (9), pellets and viruses
+    //    arrived in (8)). Two O(n) rebuilds per tick is the obviously-correct
+    //    choice over cleverness about staleness — an optimization candidate,
+    //    not debt.
     rebuild(world.grid, world.entities, world.tuning.world_extent,
             world.tuning.grid_cell_size);
 

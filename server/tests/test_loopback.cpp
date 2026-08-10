@@ -356,11 +356,13 @@ TEST(Loopback, CursorChaseOverRealUdp)
     bind_address.port = loopback_port;
 
     MiniServer server{};
-    // The wire chain is the thing under test, not gameplay: an empty pellet
-    // field keeps every send a single deterministic chunk, the spawn
-    // mass exactly 10 on first sighting, and the post-disconnect world
-    // exactly empty. Eating has its own suite in core.
+    // The wire chain is the thing under test, not gameplay: empty pellet
+    // and virus fields (M5 refills viruses like pellets) keep every send a
+    // single deterministic chunk, the spawn mass exactly 10 on first
+    // sighting, and the post-disconnect world exactly empty. Eating has its
+    // own suite in core.
     server.world.tuning.target_pellet_count = 0;
+    server.world.tuning.target_virus_count = 0;
     server.host = enet_host_create(&bind_address, 8,
                                    static_cast<std::size_t>(net::Channel::Count), 0, 0);
     ASSERT_NE(server.host, nullptr) << "cannot bind 127.0.0.1:" << loopback_port;
