@@ -123,4 +123,79 @@ std::optional<WelcomePayload> read_welcome(ByteReader& r) noexcept
     return r.underflowed ? std::nullopt : std::optional{p};
 }
 
+void write_entity_record(ByteWriter& w, const EntityRecord& record) noexcept
+{
+    write_u32(w, record.id);
+    write_u16(w, record.owner);
+    write_u8(w, record.kind);
+    write_u16(w, record.x);
+    write_u16(w, record.y);
+    write_u16(w, record.mass);
+}
+
+std::optional<EntityRecord> read_entity_record(ByteReader& r) noexcept
+{
+    if (remaining(r) < entity_record_bytes) {
+        return std::nullopt;
+    }
+    EntityRecord record{};
+    record.id = read_u32(r);
+    record.owner = read_u16(r);
+    record.kind = read_u8(r);
+    if (record.kind >= entity_kind_count) {
+        return std::nullopt;
+    }
+    record.x = read_u16(r);
+    record.y = read_u16(r);
+    record.mass = read_u16(r);
+    return r.underflowed ? std::nullopt : std::optional{record};
+}
+
+void write_snapshot(ByteWriter& w, std::uint32_t tick,
+                    std::span<const EntityRecord> records) noexcept
+{
+    // Chunking is the caller's job. An oversized span is misuse, and misuse
+    // gets a flag and an untouched buffer (invariant 7) — the check runs
+    // before the first byte lands so a flagged call writes nothing at all.
+    if (records.size() > max_entities_per_chunk) {
+        w.overflowed = true;
+        return;
+    }
+    write_u8(w, static_cast<std::uint8_t>(MessageId::Snapshot));
+    write_u32(w, tick);
+    write_u16(w, static_cast<std::uint16_t>(records.size()));
+    for (const EntityRecord& record : records) {
+        write_entity_record(w, record);
+    }
+}
+
+std::optional<SnapshotHeader> read_snapshot(ByteReader& r,
+                                            std::span<EntityRecord> out) noexcept
+{
+    if (remaining(r) < snapshot_header_bytes) {
+        return std::nullopt;
+    }
+    if (static_cast<MessageId>(read_u8(r)) != MessageId::Snapshot) {
+        return std::nullopt;
+    }
+    SnapshotHeader header{};
+    header.tick = read_u32(r);
+    header.count = read_u16(r);
+    // A count past the chunk limit cannot come from write_snapshot, and a
+    // count past `out` has nowhere to decode into — reject both before
+    // touching a single record.
+    const std::size_t count = header.count;
+    if (count > max_entities_per_chunk || count > out.size()) {
+        return std::nullopt;
+    }
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto record = read_entity_record(r);
+        if (!record) {
+            return std::nullopt;
+        }
+        out[i] = *record;
+    }
+    return r.underflowed ? std::nullopt : std::optional{header};
+}
+
 } // namespace blob::net
