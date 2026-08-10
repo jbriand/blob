@@ -7,7 +7,8 @@
 namespace blob::sim {
 
 /// Every gameplay constant in one aggregate — data, not scattered `constexpr`,
-/// so a future server-side config file can override values at startup while
+/// so the server-side config file (server/src/config.cpp) overrides values at
+/// startup while
 /// `core` stays free of I/O (the parsing will live in server/, never here).
 /// Derived values (`tick_dt`) are functions of the struct rather than stored
 /// fields, so an override can never leave a stale companion constant behind.
@@ -63,7 +64,8 @@ struct Tuning {
 
     /// Starting Cell mass for a fresh player: heavy enough to not be instant
     /// food for another spawn, light enough that the first minute is spent
-    /// grazing pellets. Also the anchor mass of the speed curve.
+    /// grazing pellets. (The speed curve's anchor is a separate literal 10 in
+    /// speed_for_mass — changing this does not move that curve.)
     float spawn_mass = 10.0f;
 
     /// Decay taxes only mass above this line and never drags a cell below it

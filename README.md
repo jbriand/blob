@@ -154,7 +154,8 @@ interpolation is the next client iteration.
 
 ## What's actually implemented
 
-Enough to compile, link, run and test — not enough to play.
+Playable: cursor-chase, pellets, eating and respawns over real UDP (see
+*Playing it* above). What each piece contributes:
 
 - `core/math` — `Vec2`, constexpr, zero-safe normalize.
 - `core/net` — quantization helpers (position → 16 bits, direction → 8 bits),

@@ -7,8 +7,9 @@
 
 namespace blob::net {
 
-/// Bumped whenever the packing of any message changes. Client and server
-/// exchange it in the handshake and refuse to talk across a mismatch.
+/// Bumped whenever the packing of any message changes. The check is one-way
+/// today: Welcome carries the server's version and the client refuses on a
+/// mismatch; symmetric refusal waits for M6's Hello payload.
 inline constexpr std::uint16_t protocol_version = 2;   // 2: snapshot messages (M1)
 
 enum class MessageId : std::uint8_t {

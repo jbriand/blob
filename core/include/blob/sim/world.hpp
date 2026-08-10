@@ -85,8 +85,9 @@ struct World {
 /// default-seeded rng — which is what most movement tests use.
 [[nodiscard]] World make_world(std::uint32_t seed);
 
-/// Ids are monotonic and never reused, and step()'s compaction reorders and
-/// removes — nothing may hold an index across a step; hold the id instead.
+/// Ids are monotonic and never reused, and step()'s compaction (stable
+/// erase_if) shifts indices and removes — nothing may hold an index across a
+/// step; hold the id instead.
 EntityId spawn(World& world, EntityKind kind, math::Vec2 position, float mass,
                PlayerId owner = 0);
 

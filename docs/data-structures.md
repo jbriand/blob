@@ -124,12 +124,12 @@ so a config override can never leave a stale companion constant behind.
 
 **The config-file story:** the server's flat `key = value` file
 ([`server/blob-server.cfg.example`](../server/blob-server.cfg.example), parsed by
-[`server/src/config.cpp`](../server/src/config.cpp)) currently overrides six of these —
-`tick_rate`, `world_extent`, `base_speed`, `speed_mass_exponent`, `radius_factor`,
-`grid_cell_size` — plus the host settings `port` and `max_clients`. The remaining knobs
-(eat, pellet, spawn, decay) are compile-time defaults today; adding a key means adding a
-parser branch, a `KeyLines` slot, and any wire-width validation. Validation pins the wire:
-`tick_rate` ∈ [1, 255] (u8 in Welcome), `world_extent` ∈ (0, 65535] (u16 in Welcome).
+[`server/src/config.cpp`](../server/src/config.cpp)) overrides every `Tuning` field —
+all thirteen knobs — plus the host settings `port` and `max_clients`. Adding a future
+key means adding a parser branch, a `KeyLines` slot, and any semantic validation.
+Validation pins the wire where it must — `tick_rate` ∈ [1, 255] (u8 in Welcome),
+`world_extent` ∈ (0, 65535] (u16 in Welcome) — and sanity elsewhere (`eat_ratio` > 1,
+`eat_depth_factor` ∈ (0, 1], `decay_rate` ≥ 0 with 0 disabling decay, …).
 
 ## SpatialGrid + GridEntry
 

@@ -27,8 +27,9 @@ struct GridEntry {
 /// everything moves every tick, so a rebuild beats incremental maintenance.
 ///
 /// Entry indices are positions in the span passed to rebuild() and are valid
-/// only until the next rebuild: M3's swap-remove compaction reorders entities
-/// between steps, so nothing may hold one longer (hold the EntityId instead).
+/// only until the next rebuild: step()'s compaction (stable erase_if) shifts
+/// indices between steps, so nothing may hold one longer (hold the EntityId
+/// instead).
 struct SpatialGrid {
     float                      cell_size{};   ///< bucket side, world units
     std::int32_t               cols{};        ///< square grid: cols x cols buckets

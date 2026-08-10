@@ -54,6 +54,13 @@ struct KeyLines {
     int speed_mass_exponent{};
     int radius_factor{};
     int grid_cell_size{};
+    int eat_ratio{};
+    int eat_depth_factor{};
+    int target_pellet_count{};
+    int pellet_mass{};
+    int spawn_mass{};
+    int decay_threshold{};
+    int decay_rate{};
 };
 
 /// Semantic bounds, run once over the final values rather than per
@@ -83,6 +90,31 @@ void validate(const ServerConfig& config, const KeyLines& at, std::vector<Config
     }
     if (config.max_clients < 1) {
         errors.push_back({at.max_clients, "max_clients must be >= 1"});
+    }
+    if (!(t.eat_ratio > 1.0f)) {
+        errors.push_back({at.eat_ratio,
+                          "eat_ratio must be > 1 — at 1 or below, equal-mass cells could "
+                          "eat each other"});
+    }
+    if (!(t.eat_depth_factor > 0.0f) || t.eat_depth_factor > 1.0f) {
+        errors.push_back({at.eat_depth_factor,
+                          "eat_depth_factor must be in (0, 1] — it is a fraction of the "
+                          "victim's radius"});
+    }
+    if (t.target_pellet_count < 0) {
+        errors.push_back({at.target_pellet_count, "target_pellet_count must be >= 0"});
+    }
+    if (!(t.pellet_mass > 0.0f)) {
+        errors.push_back({at.pellet_mass, "pellet_mass must be > 0"});
+    }
+    if (!(t.spawn_mass > 0.0f)) {
+        errors.push_back({at.spawn_mass, "spawn_mass must be > 0"});
+    }
+    if (!(t.decay_threshold >= 0.0f)) {
+        errors.push_back({at.decay_threshold, "decay_threshold must be >= 0"});
+    }
+    if (!(t.decay_rate >= 0.0f)) {
+        errors.push_back({at.decay_rate, "decay_rate must be >= 0 (0 disables decay)"});
     }
 }
 
@@ -162,6 +194,27 @@ ParseResult parse_config(std::string_view text)
             else { malformed(); }
         } else if (key == "grid_cell_size") {
             if (float v{}; parse_number(value, v)) { c.tuning.grid_cell_size = v; at.grid_cell_size = line_no; }
+            else { malformed(); }
+        } else if (key == "eat_ratio") {
+            if (float v{}; parse_number(value, v)) { c.tuning.eat_ratio = v; at.eat_ratio = line_no; }
+            else { malformed(); }
+        } else if (key == "eat_depth_factor") {
+            if (float v{}; parse_number(value, v)) { c.tuning.eat_depth_factor = v; at.eat_depth_factor = line_no; }
+            else { malformed(); }
+        } else if (key == "target_pellet_count") {
+            if (int v{}; parse_number(value, v)) { c.tuning.target_pellet_count = v; at.target_pellet_count = line_no; }
+            else { malformed(); }
+        } else if (key == "pellet_mass") {
+            if (float v{}; parse_number(value, v)) { c.tuning.pellet_mass = v; at.pellet_mass = line_no; }
+            else { malformed(); }
+        } else if (key == "spawn_mass") {
+            if (float v{}; parse_number(value, v)) { c.tuning.spawn_mass = v; at.spawn_mass = line_no; }
+            else { malformed(); }
+        } else if (key == "decay_threshold") {
+            if (float v{}; parse_number(value, v)) { c.tuning.decay_threshold = v; at.decay_threshold = line_no; }
+            else { malformed(); }
+        } else if (key == "decay_rate") {
+            if (float v{}; parse_number(value, v)) { c.tuning.decay_rate = v; at.decay_rate = line_no; }
             else { malformed(); }
         } else {
             // An unknown key is an error, never a skip: `base_sped = 900`

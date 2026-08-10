@@ -29,8 +29,8 @@ sim::World arena(std::uint32_t seed = 1u)
     return w;
 }
 
-/// Compaction reorders and removes, so tests hold ids, never indices — the
-/// same rule the header imposes on everyone else.
+/// Compaction shifts indices and removes, so tests hold ids, never indices —
+/// the same rule the header imposes on everyone else.
 sim::Entity* find_entity(sim::World& w, sim::EntityId id)
 {
     const auto it = std::ranges::find(w.entities, id, &sim::Entity::id);
@@ -159,8 +159,9 @@ TEST(Eating, SameOwnerCellsAndVirusesAreInert)
 TEST(Eating, ChainResolvesInArrayOrderAndConservesMass)
 {
     // Three rivals stacked on one spot: mid (first in the array) eats small,
-    // then big eats the grown mid — 110 vs 80 clears the ratio gate only
-    // because mid already swallowed small, so the recorded order proves
+    // then big eats the grown mid. The ratio gate would clear either way
+    // (110 >= 1.25*60 too); the recorded event order and the conserved total
+    // are what prove
     // resolution ran in array order. Total mass lands in one survivor intact.
     sim::World w = arena();
     const auto mid = sim::spawn(w, sim::EntityKind::Cell, {4000.0f, 4000.0f}, 60.0f, 2);

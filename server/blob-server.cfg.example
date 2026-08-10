@@ -14,3 +14,10 @@ base_speed = 720              # speed of a mass-10 cell, world units/s — overa
 speed_mass_exponent = -0.44   # mass->speed falloff; keep negative or the biggest cell is also the fastest
 radius_factor = 4             # drawn/collision radius = radius_factor * sqrt(mass)
 grid_cell_size = 256          # broad-phase bucket side, world units (> 0)
+eat_ratio = 1.25              # a cell eats a cell only above this mass ratio (> 1)
+eat_depth_factor = 0.333333   # victim centre must be inside eater by this fraction of the victim's radius (0..1]
+target_pellet_count = 2000    # the pellet field refills to this every tick (>= 0)
+pellet_mass = 1               # mass of one pellet (> 0)
+spawn_mass = 10               # starting cell mass for a fresh or respawned player (> 0)
+decay_threshold = 200         # decay taxes only mass above this line, and floors at it (>= 0)
+decay_rate = 0.002            # exponential decay lambda per second (>= 0; 0 disables decay)

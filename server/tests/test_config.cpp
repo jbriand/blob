@@ -20,6 +20,13 @@ void expect_config_eq(const server::ServerConfig& actual, const server::ServerCo
     EXPECT_FLOAT_EQ(actual.tuning.speed_mass_exponent, expected.tuning.speed_mass_exponent);
     EXPECT_FLOAT_EQ(actual.tuning.radius_factor, expected.tuning.radius_factor);
     EXPECT_FLOAT_EQ(actual.tuning.grid_cell_size, expected.tuning.grid_cell_size);
+    EXPECT_FLOAT_EQ(actual.tuning.eat_ratio, expected.tuning.eat_ratio);
+    EXPECT_FLOAT_EQ(actual.tuning.eat_depth_factor, expected.tuning.eat_depth_factor);
+    EXPECT_EQ(actual.tuning.target_pellet_count, expected.tuning.target_pellet_count);
+    EXPECT_FLOAT_EQ(actual.tuning.pellet_mass, expected.tuning.pellet_mass);
+    EXPECT_FLOAT_EQ(actual.tuning.spawn_mass, expected.tuning.spawn_mass);
+    EXPECT_FLOAT_EQ(actual.tuning.decay_threshold, expected.tuning.decay_threshold);
+    EXPECT_FLOAT_EQ(actual.tuning.decay_rate, expected.tuning.decay_rate);
 }
 
 } // namespace
@@ -41,7 +48,14 @@ TEST(Config, EveryKeyRoundTrips)
         "base_speed = 500.5\n"
         "speed_mass_exponent = -0.5\n"
         "radius_factor = 6.25\n"
-        "grid_cell_size = 128\n");
+        "grid_cell_size = 128\n"
+        "eat_ratio = 1.5\n"
+        "eat_depth_factor = 0.5\n"
+        "target_pellet_count = 500\n"
+        "pellet_mass = 2\n"
+        "spawn_mass = 15\n"
+        "decay_threshold = 150\n"
+        "decay_rate = 0.01\n");
     ASSERT_TRUE(result.errors.empty());
     expect_config_eq(result.config,
                      server::ServerConfig{
@@ -52,7 +66,14 @@ TEST(Config, EveryKeyRoundTrips)
                                          .base_speed          = 500.5f,
                                          .speed_mass_exponent = -0.5f,
                                          .radius_factor       = 6.25f,
-                                         .grid_cell_size      = 128.0f},
+                                         .grid_cell_size      = 128.0f,
+                                         .eat_ratio           = 1.5f,
+                                         .eat_depth_factor    = 0.5f,
+                                         .target_pellet_count = 500,
+                                         .pellet_mass         = 2.0f,
+                                         .spawn_mass          = 15.0f,
+                                         .decay_threshold     = 150.0f,
+                                         .decay_rate          = 0.01f},
                      });
 }
 
@@ -190,6 +211,29 @@ TEST(Config, PositivityBounds)
 
     EXPECT_EQ(server::parse_config("max_clients = 0\n").errors.size(), 1u);
     EXPECT_TRUE(server::parse_config("max_clients = 1\n").errors.empty());
+}
+
+TEST(Config, GameplayKnobBounds)
+{
+    // The M3 knobs: gates that would degenerate the game are rejected, and
+    // the deliberate edge values are accepted.
+    EXPECT_FALSE(server::parse_config("eat_ratio = 1.0\n").errors.empty());
+    EXPECT_FALSE(server::parse_config("eat_ratio = 0.8\n").errors.empty());
+    EXPECT_TRUE(server::parse_config("eat_ratio = 1.01\n").errors.empty());
+
+    EXPECT_FALSE(server::parse_config("eat_depth_factor = 0\n").errors.empty());
+    EXPECT_FALSE(server::parse_config("eat_depth_factor = 1.5\n").errors.empty());
+    EXPECT_TRUE(server::parse_config("eat_depth_factor = 1\n").errors.empty());
+
+    EXPECT_FALSE(server::parse_config("target_pellet_count = -1\n").errors.empty());
+    EXPECT_TRUE(server::parse_config("target_pellet_count = 0\n").errors.empty());
+
+    EXPECT_FALSE(server::parse_config("pellet_mass = 0\n").errors.empty());
+    EXPECT_FALSE(server::parse_config("spawn_mass = 0\n").errors.empty());
+    EXPECT_FALSE(server::parse_config("decay_threshold = -1\n").errors.empty());
+
+    EXPECT_FALSE(server::parse_config("decay_rate = -0.1\n").errors.empty());
+    EXPECT_TRUE(server::parse_config("decay_rate = 0\n").errors.empty());   // 0 = decay off
 }
 
 TEST(Config, EveryErrorIsReportedNotJustTheFirst)

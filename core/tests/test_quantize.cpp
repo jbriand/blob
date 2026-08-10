@@ -17,7 +17,7 @@ TEST(Quantize, PositionRoundTripStaysUnderHalfAStep)
 
     for (float v : {0.0f, 1.0f, 123.456f, 4096.0f, extent}) {
         const float back = net::dequantize_position(net::quantize_position(v, extent), extent);
-        EXPECT_NEAR(back, v, step) << "value " << v;
+        EXPECT_NEAR(back, v, 0.5f * step) << "value " << v;   // round-to-nearest: half a step
     }
 }
 
