@@ -20,12 +20,14 @@ namespace math = blob::math;
 
 namespace {
 
-/// A seeded world with the pellet field switched off — an empty arena that
-/// contains exactly what the test spawns.
+/// A seeded world with both maintained fields switched off (M5 gave viruses
+/// the same refill treatment as pellets) — an empty arena that contains
+/// exactly what the test spawns.
 sim::World arena(std::uint32_t seed = 1u)
 {
     sim::World w = sim::make_world(seed);
     w.tuning.target_pellet_count = 0;
+    w.tuning.target_virus_count = 0;
     return w;
 }
 
@@ -136,20 +138,22 @@ TEST(Eating, PelletOnTheRimIsEaten)
     EXPECT_EQ(w.events.eats.front().eaten, on_rim);
 }
 
-TEST(Eating, SameOwnerCellsNeverEatAndVirusesStayInert)
+TEST(Eating, SameOwnerCellsNeverEatAndBelowGateVirusIsTerrain)
 {
     // Ratio 15 at deep overlap would be an instant meal between rivals; the
     // shared owner alone must protect it. With both cooldowns expired the pair
     // sits outside the merge window (20 > merge_overlap·max(r)) and push-apart
     // is dormant (it runs only WHILE a cooldown runs — ROADMAP's rule, so that
     // steered remerging stays reachable): the overlap simply persists, and
-    // neither mass nor an eat event may move. The virus overlaps at ratio
-    // 1.5 — eatable if kind were ignored — and must sit there untouched until
-    // M5's pop rule; same-owner resolution handles Cells only.
+    // neither mass nor an eat event may move. The virus (M5: poppable, no
+    // longer inert) is placed past the big cell's pop reach — dist 60 >
+    // r_e − depth·r_v = 4·√150 − 40/3 ≈ 35.7 — but overlapping the small
+    // cell, for which it is terrain (10 < eat_ratio·100): it must sit there
+    // untouched; same-owner resolution handles Cells only.
     sim::World w = arena();
     const auto big = sim::spawn(w, sim::EntityKind::Cell, {3000.0f, 3000.0f}, 150.0f, 5);
     const auto small = sim::spawn(w, sim::EntityKind::Cell, {3020.0f, 3000.0f}, 10.0f, 5);
-    const auto virus = sim::spawn(w, sim::EntityKind::Virus, {3000.0f, 3000.0f}, 100.0f);
+    const auto virus = sim::spawn(w, sim::EntityKind::Virus, {3060.0f, 3000.0f}, 100.0f);
     sim::step(w, sim::tick_dt(w.tuning));
 
     ASSERT_EQ(w.entities.size(), 3u);
@@ -162,7 +166,7 @@ TEST(Eating, SameOwnerCellsNeverEatAndVirusesStayInert)
     // Expired cooldowns, outside the merge window: nobody moves anybody.
     EXPECT_FLOAT_EQ(find_entity(w, big)->position.x, 3000.0f);
     EXPECT_FLOAT_EQ(find_entity(w, small)->position.x, 3020.0f);
-    EXPECT_FLOAT_EQ(find_entity(w, virus)->position.x, 3000.0f);
+    EXPECT_FLOAT_EQ(find_entity(w, virus)->position.x, 3060.0f);
 }
 
 TEST(Eating, ChainResolvesInArrayOrderAndConservesMass)
@@ -309,9 +313,11 @@ TEST(Pellets, FieldIsSownAndRestoredThroughTheSameIds)
 {
     // A small field keeps the arithmetic checkable: the first step sows all
     // of it, a grazer parked on a known pellet eats everything in reach, and
-    // the same step's respawn phase refills the field — with fresh ids.
+    // the same step's respawn phase refills the field — with fresh ids. The
+    // virus field is off so the id arithmetic below stays pellet-only.
     sim::World w = sim::make_world(20260810u);
     w.tuning.target_pellet_count = 64;
+    w.tuning.target_virus_count = 0;
 
     sim::step(w, sim::tick_dt(w.tuning));
     ASSERT_EQ(count_kind(w, sim::EntityKind::Pellet), 64);

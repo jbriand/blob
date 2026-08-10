@@ -22,12 +22,14 @@ namespace math = blob::math;
 
 namespace {
 
-/// A seeded world with the pellet field switched off — an empty arena that
-/// contains exactly what the test spawns.
+/// A seeded world with both maintained fields switched off (M5 gave viruses
+/// the same refill treatment as pellets) — an empty arena that contains
+/// exactly what the test spawns.
 sim::World arena(std::uint32_t seed = 1u)
 {
     sim::World w = sim::make_world(seed);
     w.tuning.target_pellet_count = 0;
+    w.tuning.target_virus_count = 0;
     return w;
 }
 
