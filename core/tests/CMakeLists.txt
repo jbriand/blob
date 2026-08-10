@@ -6,6 +6,7 @@ add_executable(blob_core_tests
     test_snapshot.cpp
     test_world.cpp
     test_spatial_grid.cpp
+    test_eating.cpp
 )
 
 target_link_libraries(blob_core_tests PRIVATE blob::core GTest::gtest_main)
