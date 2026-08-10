@@ -39,6 +39,43 @@ struct Tuning {
     /// misses pairs — anything with a longer reach (a big cell's eat radius)
     /// must go through `for_each_in_circle` instead.
     float grid_cell_size = 256.0f;
+
+    /// A cell eats another cell only above this mass ratio. Strictly > 1 on
+    /// purpose: at 1.0 near-equal cells would eat each other on touch and
+    /// every skirmish would end in a coin flip — "bigger" has to be a real,
+    /// earnable edge before it grants a kill.
+    float eat_ratio = 1.25f;
+
+    /// How deep the victim's centre must sit inside the eater before a
+    /// cell-vs-cell eat lands: dist <= r_eater − factor·r_victim. Rim contact
+    /// is deliberately not enough — committing to the overlap is what makes
+    /// near-misses readable and escapes possible.
+    float eat_depth_factor = 1.0f / 3.0f;
+
+    /// Pellet population step() maintains; eaten pellets respawn the same
+    /// tick. This is map density (idle income everywhere), not an economy —
+    /// the field never runs dry.
+    int target_pellet_count = 2000;
+
+    /// Mass of one pellet. Exactly 1 keeps early growth countable, and the
+    /// linear wire encoding shows it exactly (see CLAUDE.md § Quantization).
+    float pellet_mass = 1.0f;
+
+    /// Starting Cell mass for a fresh player: heavy enough to not be instant
+    /// food for another spawn, light enough that the first minute is spent
+    /// grazing pellets. Also the anchor mass of the speed curve.
+    float spawn_mass = 10.0f;
+
+    /// Decay taxes only mass above this line and never drags a cell below it
+    /// (the decay floor). Small cells keep everything, and starvation deaths
+    /// are impossible — dying takes being eaten.
+    float decay_threshold = 200.0f;
+
+    /// Exponential decay rate λ, per second, applied as e^(−λ·dt) so the loss
+    /// over a second is the same at any tick rate (invariant 3 — a per-tick
+    /// factor would silently break frame-rate independence). Gentle by
+    /// design: an anti-snowball drag, not a diet.
+    float decay_rate = 0.002f;
 };
 
 /// What the game ships with; also the values the tests pin against.
