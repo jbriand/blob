@@ -16,6 +16,11 @@ TEST(World, StepIsFrameRateIndependent)
     sim::World fine;
 
     const auto seed = [](sim::World& w) {
+        // Empty pellet field: eating an M3 pellet quantizes the mass (and so
+        // the speed) change to a tick boundary, which is inherent to discrete
+        // meals, not a dt bug — this canary asserts what it always has, that
+        // the *continuous* dynamics are dt-scaled.
+        w.tuning.target_pellet_count = 0;
         const auto id = sim::spawn(w, sim::EntityKind::Cell, {100.0f, 100.0f}, 10.0f,
                                    /*owner=*/1);
         EXPECT_NE(id, 0u);
@@ -45,6 +50,7 @@ TEST(World, HeavierCellsAreSlower)
 TEST(World, EntitiesStayInsideTheWorldSquare)
 {
     sim::World w;
+    w.tuning.target_pellet_count = 0;   // the clamp is the point; 200 ticks of pellet field is not
     sim::spawn(w, sim::EntityKind::Cell, {10.0f, 10.0f}, 10.0f, /*owner=*/1);
     sim::apply_intent(w, sim::PlayerIntent{.player = 1, .direction = {-1.0f, -1.0f}});
 
@@ -135,4 +141,19 @@ TEST(Tuning, DefaultsAreSane)
     EXPECT_EQ(sim::radius_for_mass(t, 0.0f), 0.0f);
     EXPECT_LT(sim::radius_for_mass(t, 10.0f), sim::radius_for_mass(t, 100.0f));
     EXPECT_LT(sim::radius_for_mass(t, 100.0f), sim::radius_for_mass(t, 1000.0f));
+
+    // M3 knobs. eat_ratio strictly > 1, or equal cells would eat each other
+    // on touch; the depth factor must be a real fraction — 0 would make rim
+    // contact enough, 1 would demand more than full engulfment of the radius.
+    EXPECT_GT(t.eat_ratio, 1.0f);
+    EXPECT_GT(t.eat_depth_factor, 0.0f);
+    EXPECT_LT(t.eat_depth_factor, 1.0f);
+    EXPECT_GT(t.target_pellet_count, 0);
+    EXPECT_GT(t.pellet_mass, 0.0f);
+    EXPECT_GT(t.spawn_mass, 0.0f);
+    EXPECT_GT(t.decay_threshold, 0.0f);
+    EXPECT_GT(t.decay_rate, 0.0f);
+    // A fresh spawn must sit below the decay line, or players would leak
+    // mass from the moment they appear.
+    EXPECT_LT(t.spawn_mass, t.decay_threshold);
 }
