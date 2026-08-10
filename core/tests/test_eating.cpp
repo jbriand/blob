@@ -136,15 +136,19 @@ TEST(Eating, PelletOnTheRimIsEaten)
     EXPECT_EQ(w.events.eats.front().eaten, on_rim);
 }
 
-TEST(Eating, SameOwnerCellsAndVirusesAreInert)
+TEST(Eating, SameOwnerCellsNeverEatAndVirusesStayInert)
 {
-    // Ratio 15 at full overlap would be an instant meal between rivals; the
-    // shared owner alone must protect it (merge/push-apart are M4's). The
-    // virus overlaps at ratio 1.5 — eatable if kind were ignored — and must
-    // sit there untouched until M5's pop rule.
+    // Ratio 15 at deep overlap would be an instant meal between rivals; the
+    // shared owner alone must protect it. Since M4 that protection no longer
+    // means stillness: overlapping siblings push apart (they sit outside the
+    // merge window — cooldowns are expired but 20 > merge_overlap·max(r) —
+    // so they cannot fuse either), which moves positions but must never move
+    // mass or record an eat. The virus overlaps at ratio 1.5 — eatable if
+    // kind were ignored — and must sit there untouched until M5's pop rule;
+    // same-owner resolution handles Cells only, so it is not even shoved.
     sim::World w = arena();
     const auto big = sim::spawn(w, sim::EntityKind::Cell, {3000.0f, 3000.0f}, 150.0f, 5);
-    const auto small = sim::spawn(w, sim::EntityKind::Cell, {3000.0f, 3000.0f}, 10.0f, 5);
+    const auto small = sim::spawn(w, sim::EntityKind::Cell, {3020.0f, 3000.0f}, 10.0f, 5);
     const auto virus = sim::spawn(w, sim::EntityKind::Virus, {3000.0f, 3000.0f}, 100.0f);
     sim::step(w, sim::tick_dt(w.tuning));
 
@@ -154,6 +158,16 @@ TEST(Eating, SameOwnerCellsAndVirusesAreInert)
     EXPECT_FLOAT_EQ(find_entity(w, big)->mass, 150.0f);
     EXPECT_FLOAT_EQ(find_entity(w, small)->mass, 10.0f);
     EXPECT_FLOAT_EQ(find_entity(w, virus)->mass, 100.0f);
+
+    // The M4 semantics on display: the overlap resolved by push-apart, out
+    // to exactly touching — protection from eating is the invariant here;
+    // being inert never was more than an M3 placeholder.
+    const float gap = find_entity(w, small)->position.x - find_entity(w, big)->position.x;
+    EXPECT_GT(gap, 20.0f);
+    EXPECT_NEAR(gap,
+                sim::radius_for_mass(w.tuning, 150.0f) + sim::radius_for_mass(w.tuning, 10.0f),
+                0.01f);
+    EXPECT_FLOAT_EQ(find_entity(w, virus)->position.x, 3000.0f);
 }
 
 TEST(Eating, ChainResolvesInArrayOrderAndConservesMass)
