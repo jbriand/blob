@@ -12,14 +12,13 @@ static_assert(std::is_aggregate_v<World>);
 static_assert(std::is_aggregate_v<Entity>);
 static_assert(std::is_aggregate_v<PlayerIntent>);
 
-float speed_for_mass(float mass) noexcept
+float speed_for_mass(const Tuning& tuning, float mass) noexcept
 {
-    // Placeholder curve, deliberately simple: base speed scaled by m^-0.44,
-    // which is roughly the shape the original uses. Tune once there is
-    // something to play against.
-    constexpr float base_speed = 720.0f;   // world units / second at mass 10
+    // Placeholder curve, deliberately simple; the numbers live in Tuning now.
+    // The clamp and the /10 pin the curve to its anchor: base_speed is
+    // *defined* as the speed at mass 10, and nothing lighter moves faster.
     const float m = std::max(mass, 10.0f);
-    return base_speed * std::pow(m / 10.0f, -0.44f);
+    return tuning.base_speed * std::pow(m / 10.0f, tuning.speed_mass_exponent);
 }
 
 EntityId spawn(World& world, EntityKind kind, math::Vec2 position, float mass, PlayerId owner)
@@ -56,15 +55,15 @@ void step(World& world, float dt)
             if (e.kind != EntityKind::Cell || e.owner != intent.player) {
                 continue;
             }
-            e.velocity = intent.direction * speed_for_mass(e.mass);
+            e.velocity = intent.direction * speed_for_mass(world.tuning, e.mass);
         }
     }
 
     // 2. Integrate and clamp to the world square.
     for (Entity& e : world.entities) {
         e.position += e.velocity * dt;
-        e.position.x = std::clamp(e.position.x, 0.0f, world_extent);
-        e.position.y = std::clamp(e.position.y, 0.0f, world_extent);
+        e.position.x = std::clamp(e.position.x, 0.0f, world.tuning.world_extent);
+        e.position.y = std::clamp(e.position.y, 0.0f, world.tuning.world_extent);
     }
 
     // TODO(spatial): uniform grid rebuild + collision resolution goes here,

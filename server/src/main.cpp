@@ -64,9 +64,9 @@ int main(int argc, char** argv)
     std::signal(SIGTERM, on_signal);
 
     blob::sim::World world;
-    auto loop = blob::server::make_tick_loop(blob::sim::tick_rate);
+    auto loop = blob::server::make_tick_loop(world.tuning.tick_rate);
 
-    std::printf("blob-server listening on udp/%u, %d Hz\n", port, blob::sim::tick_rate);
+    std::printf("blob-server listening on udp/%u, %d Hz\n", port, world.tuning.tick_rate);
 
     while (g_running.load(std::memory_order_relaxed)) {
         // Drain the socket first: input that arrived since the last tick should
@@ -92,7 +92,7 @@ int main(int argc, char** argv)
         }
 
         for (int i = blob::server::pump(loop); i > 0; --i) {
-            blob::sim::step(world, blob::sim::tick_dt);
+            blob::sim::step(world, blob::sim::tick_dt(world.tuning));
             // TODO: per-peer interest query + snapshot encode on Channel::Snapshot.
         }
 

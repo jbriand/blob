@@ -1,3 +1,4 @@
+#include <blob/sim/tuning.hpp>
 #include <blob/sim/world.hpp>
 
 #include <gtest/gtest.h>
@@ -32,8 +33,10 @@ TEST(World, StepIsFrameRateIndependent)
 
 TEST(World, HeavierCellsAreSlower)
 {
-    EXPECT_GT(sim::speed_for_mass(10.0f), sim::speed_for_mass(100.0f));
-    EXPECT_GT(sim::speed_for_mass(100.0f), sim::speed_for_mass(1000.0f));
+    EXPECT_GT(sim::speed_for_mass(sim::default_tuning, 10.0f),
+              sim::speed_for_mass(sim::default_tuning, 100.0f));
+    EXPECT_GT(sim::speed_for_mass(sim::default_tuning, 100.0f),
+              sim::speed_for_mass(sim::default_tuning, 1000.0f));
 }
 
 TEST(World, EntitiesStayInsideTheWorldSquare)
@@ -43,7 +46,7 @@ TEST(World, EntitiesStayInsideTheWorldSquare)
     sim::apply_intent(w, sim::PlayerIntent{.player = 1, .direction = {-1.0f, -1.0f}});
 
     for (int i = 0; i < 200; ++i) {
-        sim::step(w, sim::tick_dt);
+        sim::step(w, sim::tick_dt(w.tuning));
     }
 
     EXPECT_GE(w.entities.front().position.x, 0.0f);
@@ -54,8 +57,8 @@ TEST(World, TickCounterAdvancesOncePerStep)
 {
     sim::World w;
     EXPECT_EQ(w.tick, 0u);
-    sim::step(w, sim::tick_dt);
-    sim::step(w, sim::tick_dt);
+    sim::step(w, sim::tick_dt(w.tuning));
+    sim::step(w, sim::tick_dt(w.tuning));
     EXPECT_EQ(w.tick, 2u);
 }
 
@@ -64,11 +67,11 @@ TEST(World, LatestIntentReplacesThepreviousOne)
     sim::World w;
     sim::spawn(w, sim::EntityKind::Cell, {4000.0f, 4000.0f}, 10.0f, /*owner=*/1);
     sim::apply_intent(w, sim::PlayerIntent{.player = 1, .direction = {1.0f, 0.0f}});
-    sim::step(w, sim::tick_dt);
+    sim::step(w, sim::tick_dt(w.tuning));
     const float after_right = w.entities.front().position.x;
 
     sim::apply_intent(w, sim::PlayerIntent{.player = 1, .direction = {-1.0f, 0.0f}});
-    sim::step(w, sim::tick_dt);
+    sim::step(w, sim::tick_dt(w.tuning));
     EXPECT_LT(w.entities.front().position.x, after_right);
 }
 
@@ -86,10 +89,25 @@ TEST(World, IdsAreMonotonicAndStartAtOne)
     EXPECT_EQ(w.entities.size(), 2u);
 }
 
-TEST(World, TickConstantsAgreeWithEachOther)
+TEST(Tuning, DefaultsAreSane)
 {
-    // tick_rate and tick_dt live side by side at namespace scope now, so
-    // nothing stops the two drifting apart in an edit except this.
-    EXPECT_NEAR(sim::tick_dt * static_cast<float>(sim::tick_rate), 1.0f, 1e-6f);
-    EXPECT_GT(sim::world_extent, 0.0f);
+    // The old drift test (tick_rate vs. a stored tick_dt) is impossible to
+    // fail now that tick_dt is *derived* from the struct; what is still worth
+    // pinning is that the shipped defaults describe a playable game.
+    constexpr sim::Tuning t = sim::default_tuning;
+
+    EXPECT_NEAR(sim::tick_dt(t), 0.05f, 1e-6f);   // 20 Hz
+
+    EXPECT_GT(t.tick_rate, 0);
+    EXPECT_GT(t.world_extent, 0.0f);
+    EXPECT_GT(t.base_speed, 0.0f);
+    EXPECT_GT(t.radius_factor, 0.0f);
+    EXPECT_GT(t.grid_cell_size, 0.0f);
+    // Negative on purpose: big = slow. A positive sign would invert the genre.
+    EXPECT_LT(t.speed_mass_exponent, 0.0f);
+
+    // Radius grows monotonically with mass, from exactly zero.
+    EXPECT_EQ(sim::radius_for_mass(t, 0.0f), 0.0f);
+    EXPECT_LT(sim::radius_for_mass(t, 10.0f), sim::radius_for_mass(t, 100.0f));
+    EXPECT_LT(sim::radius_for_mass(t, 100.0f), sim::radius_for_mass(t, 1000.0f));
 }
