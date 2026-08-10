@@ -237,6 +237,10 @@ int main(int argc, char** argv)
     sf::RenderWindow window{sf::VideoMode{{1280u, 720u}},
                             "blob — player " + std::to_string(player_id)};
     window.setVerticalSyncEnabled(true);
+    // One KeyPressed per physical press: with auto-repeat on, a held Space
+    // would machine-gun split flags at the OS repeat rate (M4 actions are
+    // edges, and the edge is the key going down).
+    window.setKeyRepeatEnabled(false);
 
     SnapshotView view{};
     sf::CircleShape shape;   // one shape reused for every entity drawn
@@ -249,6 +253,11 @@ int main(int argc, char** argv)
     float         send_accumulator = 0.0f;
     std::uint16_t sequence         = 0;
     bool          server_gone      = false;
+    // M4 action keys (Space = split, W = eject — the genre's convention)
+    // queue here between sends; the next InputCommand carries them, then
+    // they re-arm. The server latches per press, so one press is one action.
+    bool          split_queued     = false;
+    bool          eject_queued     = false;
 
     while (window.isOpen()) {
         while (const std::optional event = window.pollEvent()) {
@@ -257,6 +266,10 @@ int main(int argc, char** argv)
             } else if (const auto* key = event->getIf<sf::Event::KeyPressed>()) {
                 if (key->code == sf::Keyboard::Key::Escape) {
                     window.close();
+                } else if (key->code == sf::Keyboard::Key::Space) {
+                    split_queued = true;
+                } else if (key->code == sf::Keyboard::Key::W) {
+                    eject_queued = true;
                 }
             }
         }
@@ -323,9 +336,11 @@ int main(int argc, char** argv)
                 .sequence = ++sequence,
                 .dir_x    = blob::net::quantize_direction(dir.x),
                 .dir_y    = blob::net::quantize_direction(dir.y),
-                .split    = false,   // M4 wires the keys
-                .eject    = false,
+                .split    = split_queued,
+                .eject    = eject_queued,
             };
+            split_queued = false;   // the queued edges ride exactly one command;
+            eject_queued = false;   // from here the server's latch owns them
             std::array<std::byte, 6> buffer{};   // write_input is exactly 6 B
             blob::net::ByteWriter    writer{.buffer = buffer};
             blob::net::write_input(writer, cmd);
