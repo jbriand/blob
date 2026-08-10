@@ -1,0 +1,16 @@
+# blob-server configuration — every key with its default value.
+#
+# Copy this file to `blob-server.cfg` next to the binary (or point at it with
+# `blob-server --config <path>`). Flat `key = value` lines; `#` starts a
+# comment, full-line or trailing; blank lines are fine. A typo'd or out-of-range
+# value makes the server print every problem and refuse to start — it never
+# falls back to defaults silently. CLI port beats this file: `blob-server 7878`.
+
+port = 7777                   # UDP port the host listens on
+max_clients = 64              # peer slots on the ENet host (>= 1)
+tick_rate = 20                # simulation Hz; sent to clients in Welcome (u8: 1..255)
+world_extent = 8192           # side of the square world, world units (u16 wire bound: up to 65535)
+base_speed = 720              # speed of a mass-10 cell, world units/s — overall game pace
+speed_mass_exponent = -0.44   # mass->speed falloff; keep negative or the biggest cell is also the fastest
+radius_factor = 4             # drawn/collision radius = radius_factor * sqrt(mass)
+grid_cell_size = 256          # broad-phase bucket side, world units (> 0)

@@ -6,6 +6,7 @@
 
 add_executable(blob_server
     src/main.cpp
+    src/config.cpp
     src/tick_loop.cpp
 )
 
