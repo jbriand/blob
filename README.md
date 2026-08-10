@@ -48,6 +48,20 @@ ON in every preset; it defaults to OFF for anyone configuring by hand.
 | `linux-clang-headless` | Linux | core, server, tests |
 | `linux-clang-asan` | Linux | as `linux-clang`, ASan + UBSan |
 
+## Documentation
+
+Contributor docs live in [docs/](docs/) — start with architecture, drill down as needed:
+
+- [docs/architecture.md](docs/architecture.md) — the three build products and the enforced
+  purity boundary, the authoritative-server model, both event loops, the fixed timestep,
+  threading, and the plain-struct doctrine.
+- [docs/data-structures.md](docs/data-structures.md) — every struct field by field, with
+  invariants: `Vec2` to `World`, the CSR grid, the byte cursors, the wire structs.
+- [docs/protocol.md](docs/protocol.md) — the wire byte for byte: versioning, channels,
+  message layouts, chunking, quantization, the sequence guard, robustness rules.
+- [docs/simulation-math.md](docs/simulation-math.md) — the formulas derived: speed, radius,
+  eat geometry, dt-independent decay, the grid's completeness bound, determinism & replay.
+
 ## Externals
 
 FetchContent, in `cmake/blob_externals.cmake`. Three dependencies, pinned by
