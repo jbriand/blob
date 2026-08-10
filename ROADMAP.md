@@ -20,7 +20,12 @@ Definition of done, every iteration:
 
 ---
 
-## M1 — Snapshot wire format  `core/net`  (size: S–M)
+## M1 — Snapshot wire format  `core/net`  (size: S–M) — ✅ shipped 2026-08-10
+
+*Landed via branch `m1-snapshot-codec`, as specced below with two refinements: net stayed
+standalone (raw-integer wire types, no `<blob/sim/…>` include — the `EntityKind` mirror is
+a test-side static_assert), and `read_snapshot` decodes into a caller-provided span so the
+codec never allocates. 13 new tests; `protocol_version` = 2.*
 
 **Goal:** the server can encode world state, the client can decode it. Unblocks the first
 end-to-end playable: cursor-chase over real UDP.
@@ -53,7 +58,15 @@ empty snapshot is legal.
 Unblocks (outside core, not part of this iteration): the three server TODOs (Welcome on
 connect, Input decode → `apply`, snapshot broadcast) and the client's snapshot buffer.
 
-## M2 — Radius, tuning header, spatial grid  `core/sim`  (size: M)
+## M2 — Radius, tuning header, spatial grid  `core/sim`  (size: M) — ✅ shipped 2026-08-10
+
+*Landed via branch `m2-spatial-grid`, one deliberate upgrade over the spec below: the
+constants shipped as the `sim::Tuning` aggregate (data with NSDMI defaults +
+`default_tuning`, `tick_dt` derived) rather than bare constexpr, so a server-side config
+file can override them at startup — parsing will live in server/, core stays I/O-free.
+CSR grid with defensively-clamped queries; differential + tripwire tests measured ~17.8k
+candidate pairs at n=2048 against an 81.9k alarm bound (all-pairs would be ~2.1M). 9 new
+tests.*
 
 **Goal:** the broad phase that invariant 6 demands, before any pairwise gameplay exists.
 

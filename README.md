@@ -130,17 +130,24 @@ Enough to compile, link, run and test — not enough to play.
 - `core/math` — `Vec2`, constexpr, zero-safe normalize.
 - `core/net` — quantization helpers (position → 16 bits, direction → 8 bits),
   message ids, ENet channel split (reliable control / unreliable snapshot),
-  `ByteWriter`/`ByteReader` that report overflow instead of scribbling.
+  `ByteWriter`/`ByteReader` that report overflow instead of scribbling, and the
+  snapshot codec (protocol v2): 13 B entity records in self-contained chunks of
+  at most 91 against a 1200 B soft MTU. net is standalone — wire types are raw
+  integers; the `sim::EntityKind` mirror is asserted where the tests link both.
 - `core/sim` — `World` with a frame-rate-independent `step(world, dt)`,
-  mass-dependent speed, entity kinds. Collision, split/merge and the spatial
-  grid are `TODO`.
+  mass-dependent speed, entity kinds; every gameplay constant lives in the
+  `Tuning` aggregate (data, so a server config file can override it later);
+  uniform CSR `SpatialGrid` rebuilt each step, with circle and candidate-pair
+  queries. Collision and split/merge are `TODO`.
 - `server` — fixed-timestep `TickLoop` with a catch-up clamp, ENet host that
   drains the socket before each tick and sleeps inside `enet_host_service` so a
   packet can wake it early.
 - `client` — SFML 3 window, cursor → quantized intent, one placeholder circle.
-- 29 GoogleTest cases across two targets — `blob_core_tests` (label `core`) and
+- 51 GoogleTest cases across two targets — `blob_core_tests` (label `core`) and
   `blob_server_tests` (label `server`) — including a frame-rate-independence
-  check on `step` and a catch-up-clamp check on the tick loop.
+  check on `step`, differential grid tests against brute force with an O(n²)
+  tripwire, exhaustive snapshot-truncation rejection, and a catch-up-clamp
+  check on the tick loop.
 
 Data types here are plain structs and the operations on them are free functions
 taking the struct first — `step(world, dt)`, `write_u8(w, v)`, `pump(loop)` —

@@ -66,8 +66,8 @@ Public headers live in `core/include/blob/<module>/`, included as `<blob/module/
 | Module | Purpose |
 |---|---|
 | `math/` | `Vec2`: constexpr plain struct (`is_aggregate`/`is_trivially_copyable` asserted in `vec2.cpp`), with every operation beside it as a free function — non-member arithmetic operators, `dot`/`length_sq`/`length`, zero-safe `normalized()` (returns `{0,0}` instead of NaN — a cursor exactly on the cell is normal input, not an error). |
-| `net/` | **The wire format, not the transport.** `quantize.hpp` is the *only* place packing rules live, shared verbatim by both sides: position→u16 per axis against the world extent (~0.125 units/step at 8192), direction→i8 per axis, mass→u16. `protocol.hpp`: `protocol_version` (bump on any packing change; sides refuse to talk across a mismatch), `MessageId` (Hello/Input up, Welcome/Snapshot/Goodbye down), `Channel` split (Control = reliable ordered, Snapshot = unreliable), span-based `ByteWriter`/`ByteReader` — plain structs driven by free functions `write_u8/16/32`, `read_u8/16/32`, `written`, `remaining`, `exhausted` (no allocation, no exceptions — they set overflow/underflow flags instead of scribbling), and codecs `write_/read_input` (6 B) and `write_/read_welcome` (8 B); readers return `std::nullopt` on malformed input. |
-| `sim/` | The authoritative `World`, a plain struct of `entities` / `intents` / `next_id` / `tick` driven by free functions `spawn(w, …)`, `apply_intent(w, …)` and `step(w, dt)`. `EntityId` u32 (monotonic, never reused, starts at 1 — 0 means "no entity"), `PlayerId` u16, `EntityKind` {Cell, Pellet, Virus, EjectedMass}, plain `Entity`, `PlayerIntent` (unit direction or `{0,0}`, split/eject flags — `apply_intent` upserts the latest intent per player). `step` is deterministic and frame-rate independent: intent → velocity via `speed_for_mass` (placeholder `m^-0.44` curve), integrate, clamp to the 8192² square. `TODO(spatial)` in `world.cpp` marks where grid + collision must go. Constants at namespace scope, not on the struct: `tick_rate` 20 Hz, `tick_dt`, `world_extent`. |
+| `net/` | **The wire format, not the transport.** `quantize.hpp` is the *only* place packing rules live, shared verbatim by both sides: position→u16 per axis against the world extent (~0.125 units/step at 8192), direction→i8 per axis, mass→u16. `protocol.hpp`: `protocol_version` (bump on any packing change; sides refuse to talk across a mismatch), `MessageId` (Hello/Input up, Welcome/Snapshot/Goodbye down), `Channel` split (Control = reliable ordered, Snapshot = unreliable), span-based `ByteWriter`/`ByteReader` — plain structs driven by free functions `write_u8/16/32`, `read_u8/16/32`, `written`, `remaining`, `exhausted` (no allocation, no exceptions — they set overflow/underflow flags instead of scribbling), and codecs `write_/read_input` (6 B) and `write_/read_welcome` (8 B); readers return `std::nullopt` on malformed input. M1 added the snapshot family — `EntityRecord` (13 B) + `SnapshotHeader`, `write_/read_entity_record`, `write_/read_snapshot`: self-contained chunks of ≤ `max_entities_per_chunk` = 91 against a 1200 B soft MTU, `protocol_version` = 2. net is standalone by decision: wire types are raw integers and this header includes no `<blob/sim/…>` — the numeric `EntityKind` mirror (`entity_kind_count`) is enforced by a static_assert in `test_snapshot.cpp`, the one place both modules link. |
+| `sim/` | The authoritative `World`, a plain struct of `entities` / `intents` / `next_id` / `tick` / `tuning` / `grid` driven by free functions `spawn(w, …)`, `apply_intent(w, …)` and `step(w, dt)`. `EntityId` u32 (monotonic, never reused, starts at 1 — 0 means "no entity"), `PlayerId` u16, `EntityKind` {Cell, Pellet, Virus, EjectedMass}, plain `Entity`, `PlayerIntent` (unit direction or `{0,0}`, split/eject flags — `apply_intent` upserts the latest intent per player). `step` is deterministic and frame-rate independent: intent → velocity via `speed_for_mass(tuning, m)`, integrate, clamp to the square, rebuild the grid. `tuning.hpp`: every gameplay constant as the `Tuning` aggregate (data, not scattered constexpr, so a server-side config file can override at startup while core stays I/O-free; `tick_dt(tuning)` and `radius_for_mass(tuning, m)` are derived functions, never stored companions). `spatial_grid.hpp`: uniform CSR `SpatialGrid`, counting-sort `rebuild` per step, `for_each_in_circle` (any radius — what eating must use) and `for_each_candidate_pair` (complete only for pair distance ≤ `grid_cell_size`); queries treat a never-rebuilt or hand-corrupted grid as empty. `TODO(collision)` in `world.cpp` marks where eat/overlap resolution goes, off the grid only. |
 | `tests/` | GoogleTest target `blob_core_tests`, roughly one `test_<module>.cpp` per header (`protocol.hpp`'s `Protocol.*` cases currently live in `test_quantize.cpp`), ctest label `core`, `PRE_TEST` discovery. `World.StepIsFrameRateIndependent` is the canary for invariant 3 below. |
 
 ### server/ — `blob-server` (target `blob_server`)
@@ -84,7 +84,8 @@ Tested by `blob_server_tests` (`server/tests/`, ctest label `server`), which com
 host on udp/7777 (argv[1] overrides), 64 peers, 2 channels; loop = drain socket → pump
 fixed steps → sleep *inside* `enet_host_service` so an arriving packet wakes it early.
 Open TODOs here: assign PlayerId + send Welcome on connect, decode Input → `apply_intent()`,
-snapshot broadcast (blocked on the snapshot codec — see ROADMAP M1).
+snapshot broadcast — all unblocked now the M1 codec exists — plus the startup config file
+that fills `sim::Tuning` (parsing lives here, never in core).
 
 ### client/ — `blob-client` (target `blob_client`)
 
@@ -149,11 +150,13 @@ rationale in the README's "Quantization" section; any such change bumps `protoco
 
 ## Status & roadmap
 
-Walking skeleton: everything compiles, links, runs and tests green — not yet playable.
-Implemented: movement sim, quantization, Input/Welcome codecs, tick loop, window + intent
-capture. Missing: snapshot codec, spatial grid, collision/eating, split/merge, viruses,
-interest management. The iteration plan for the core lib is in [ROADMAP.md](ROADMAP.md) —
-keep both files updated as iterations land.
+Everything compiles, links, runs and tests green — not yet playable. Implemented: movement
+sim, quantization, Input/Welcome/Snapshot codecs (protocol v2), `Tuning`, spatial grid,
+tick loop, window + intent capture. M1 and M2 landed 2026-08-10 via parallel branches
+(`m1-snapshot-codec`, `m2-spatial-grid`). Missing: collision/eating (M3), split/merge (M4),
+viruses (M5), interest management (M6), and the server's use of the codecs (Welcome on
+connect, Input decode, snapshot broadcast — now unblocked). The iteration plan for the core
+lib is in [ROADMAP.md](ROADMAP.md) — keep both files updated as iterations land.
 
 **Plain-struct conversion is complete.** `Vec2`, `ByteWriter`/`ByteReader`, `TickLoop` and
 `World` all follow the struct + free-function convention above; the only remaining classes
