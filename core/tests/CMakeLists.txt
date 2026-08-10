@@ -3,7 +3,9 @@ include(GoogleTest)
 add_executable(blob_core_tests
     test_vec2.cpp
     test_quantize.cpp
+    test_snapshot.cpp
     test_world.cpp
+    test_spatial_grid.cpp
 )
 
 target_link_libraries(blob_core_tests PRIVATE blob::core GTest::gtest_main)
