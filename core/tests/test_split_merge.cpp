@@ -385,8 +385,11 @@ TEST(Merge, NeedsDeepOverlapNotMereTouch)
     // ratio gate (100 ≥ 1.25·25) would make this pair a meal between rivals;
     // the shared owner is what turns eating into merging.
     {
-        // A hair outside the window: two cells stay two cells, pushed back
-        // to touching.
+        // A hair outside the window: two cells stay two cells, and — both
+        // cooldowns being expired — push-apart is dormant, so the overlap
+        // simply persists where steering left it. That free overlap is the
+        // point of the ROADMAP rule: it is what lets convergent steering
+        // reach the window at all.
         sim::World w = arena();
         const auto a = sim::spawn(w, sim::EntityKind::Cell, {5000.0f, 5000.0f}, 100.0f, 1);
         const auto b = sim::spawn(w, sim::EntityKind::Cell, {5010.5f, 5000.0f}, 25.0f, 1);
@@ -396,10 +399,8 @@ TEST(Merge, NeedsDeepOverlapNotMereTouch)
         EXPECT_TRUE(w.events.eats.empty());
         EXPECT_EQ(find_entity(w, a)->mass, 100.0f);
         EXPECT_EQ(find_entity(w, b)->mass, 25.0f);
-        const float gap = find_entity(w, b)->position.x - find_entity(w, a)->position.x;
-        EXPECT_NEAR(gap,
-                    sim::radius_for_mass(w.tuning, 100.0f) + sim::radius_for_mass(w.tuning, 25.0f),
-                    0.01f);
+        EXPECT_FLOAT_EQ(find_entity(w, a)->position.x, 5000.0f);
+        EXPECT_FLOAT_EQ(find_entity(w, b)->position.x, 5010.5f);
     }
     {
         // A hair inside: the elder absorbs, holds its ground, and no eat

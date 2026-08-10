@@ -139,13 +139,13 @@ TEST(Eating, PelletOnTheRimIsEaten)
 TEST(Eating, SameOwnerCellsNeverEatAndVirusesStayInert)
 {
     // Ratio 15 at deep overlap would be an instant meal between rivals; the
-    // shared owner alone must protect it. Since M4 that protection no longer
-    // means stillness: overlapping siblings push apart (they sit outside the
-    // merge window — cooldowns are expired but 20 > merge_overlap·max(r) —
-    // so they cannot fuse either), which moves positions but must never move
-    // mass or record an eat. The virus overlaps at ratio 1.5 — eatable if
-    // kind were ignored — and must sit there untouched until M5's pop rule;
-    // same-owner resolution handles Cells only, so it is not even shoved.
+    // shared owner alone must protect it. With both cooldowns expired the pair
+    // sits outside the merge window (20 > merge_overlap·max(r)) and push-apart
+    // is dormant (it runs only WHILE a cooldown runs — ROADMAP's rule, so that
+    // steered remerging stays reachable): the overlap simply persists, and
+    // neither mass nor an eat event may move. The virus overlaps at ratio
+    // 1.5 — eatable if kind were ignored — and must sit there untouched until
+    // M5's pop rule; same-owner resolution handles Cells only.
     sim::World w = arena();
     const auto big = sim::spawn(w, sim::EntityKind::Cell, {3000.0f, 3000.0f}, 150.0f, 5);
     const auto small = sim::spawn(w, sim::EntityKind::Cell, {3020.0f, 3000.0f}, 10.0f, 5);
@@ -159,14 +159,9 @@ TEST(Eating, SameOwnerCellsNeverEatAndVirusesStayInert)
     EXPECT_FLOAT_EQ(find_entity(w, small)->mass, 10.0f);
     EXPECT_FLOAT_EQ(find_entity(w, virus)->mass, 100.0f);
 
-    // The M4 semantics on display: the overlap resolved by push-apart, out
-    // to exactly touching — protection from eating is the invariant here;
-    // being inert never was more than an M3 placeholder.
-    const float gap = find_entity(w, small)->position.x - find_entity(w, big)->position.x;
-    EXPECT_GT(gap, 20.0f);
-    EXPECT_NEAR(gap,
-                sim::radius_for_mass(w.tuning, 150.0f) + sim::radius_for_mass(w.tuning, 10.0f),
-                0.01f);
+    // Expired cooldowns, outside the merge window: nobody moves anybody.
+    EXPECT_FLOAT_EQ(find_entity(w, big)->position.x, 3000.0f);
+    EXPECT_FLOAT_EQ(find_entity(w, small)->position.x, 3020.0f);
     EXPECT_FLOAT_EQ(find_entity(w, virus)->position.x, 3000.0f);
 }
 

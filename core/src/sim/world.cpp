@@ -257,10 +257,16 @@ void resolve_sibling_pair(World& world, Entity& a, Entity& b)
         return;
     }
 
-    if (dist < r_a + r_b) {
-        // Push-apart: full positional correction, half the penetration each,
-        // along the centre axis. Pairs resolve in index order (the caller's
-        // loop), which is the deterministic tie-break doctrine.
+    if ((a.merge_cooldown > 0.0f || b.merge_cooldown > 0.0f) && dist < r_a + r_b) {
+        // Push-apart runs only WHILE a cooldown runs (ROADMAP's "soft
+        // push-apart while cooldowns run, merge on contact once both timers
+        // expire"). Once both have expired the pair overlaps freely — that is
+        // what lets deliberate convergent steering drive the centres into the
+        // deep merge window above; unconditional correction would park them
+        // at touching forever and make steered remerging unreachable.
+        // Full positional correction, half the penetration each, along the
+        // centre axis. Pairs resolve in index order (the caller's loop),
+        // which is the deterministic tie-break doctrine.
         const float penetration = (r_a + r_b) - dist;
         math::Vec2  axis        = math::normalized(delta);
         if (axis == math::Vec2{}) {
