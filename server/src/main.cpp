@@ -161,13 +161,9 @@ void handle_connect(ServerState& state, ENetPeer& peer)
     tag_peer(peer, id);
     blob::server::add_session(state.sessions, id);
 
-    // Placeholder spawn: world centre plus a small deterministic id-based
-    // offset so two players never stack exactly. M3's spawn_player (safe
-    // placement, respawn) replaces this call site.
-    const float extent = state.world.tuning.world_extent;
-    const float offset = 64.0f * static_cast<float>(id % 16u);
-    blob::sim::spawn(state.world, blob::sim::EntityKind::Cell,
-                     {extent * 0.5f + offset, extent * 0.5f + offset}, 10.0f, id);
+    // M3 lifecycle: one starting cell of spawn_mass at an rng position (naive
+    // placement — safe-spawn polish is M5's job).
+    blob::sim::spawn_player(state.world, id);
 
     // Welcome is session state: reliable Control channel (invariant 5).
     std::array<std::byte, 8> buffer{};
@@ -229,12 +225,9 @@ void handle_disconnect(ServerState& state, ENetPeer& peer)
 {
     const blob::sim::PlayerId id = peer_id(peer);
     blob::server::remove_session(state.sessions, id);
-    // Placeholder despawn: drop the player's entities and their standing
-    // intent. M3's despawn_player replaces both erase_ifs.
-    std::erase_if(state.world.entities,
-                  [id](const blob::sim::Entity& e) { return e.owner == id; });
-    std::erase_if(state.world.intents,
-                  [id](const blob::sim::PlayerIntent& i) { return i.player == id; });
+    // M3 lifecycle: drops the player's entities and standing intent in one
+    // call. Disconnect is not death — no event fires, nothing respawns.
+    blob::sim::despawn_player(state.world, id);
     peer.data = nullptr;
     std::printf("player %u disconnected\n", id);
 }
@@ -316,6 +309,17 @@ int main(int argc, char** argv)
         for (int i = blob::server::pump(loop); i > 0; --i) {
             blob::sim::step(state.world, blob::sim::tick_dt(state.world.tuning));
             ++ticks_this_iteration;
+
+            // Death -> immediate respawn. Read per step, not after the batch:
+            // the next step() clears world.events, so a catch-up burst would
+            // silently drop earlier ticks' deaths. Respawning inside the batch
+            // also lets the new cell participate in the remaining catch-up
+            // ticks, exactly as it would have live.
+            for (const blob::sim::PlayerId dead : state.world.events.deaths) {
+                if (blob::server::find_session(state.sessions, dead) != nullptr) {
+                    blob::sim::spawn_player(state.world, dead);
+                }
+            }
         }
 
         // Broadcast once per outer iteration, never per catch-up tick: nobody

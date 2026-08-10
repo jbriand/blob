@@ -4,9 +4,12 @@
 // snapshot broadcast -> client decodes and watches its own cell move.
 //
 // The server half is a miniature made of the SAME building blocks main.cpp
-// wires together (sessions vector + placeholder spawn + sequence guard +
-// apply_intent + step + collect_records/write_snapshot broadcast) — main()
-// itself is not callable from a test, and manual play covers its wiring.
+// wires together (sessions vector + sequence guard + apply_intent + step +
+// collect_records/write_snapshot broadcast) — main() itself is not callable
+// from a test, and manual play covers its wiring. One deliberate divergence:
+// main spawns via spawn_player (rng placement), the test spawns at a pinned
+// position so "chases the cursor rightward" cannot start clamped against the
+// world's right edge.
 // Unlike main, the test drives step() directly instead of a tick loop, so it
 // finishes in milliseconds of wall time, not in 50 ms ticks.
 
@@ -78,10 +81,13 @@ void server_handle_event(MiniServer& s, const ENetEvent& event)
         event.peer->data = reinterpret_cast<void*>(static_cast<std::uintptr_t>(id));
         blob::server::add_session(s.sessions, id);
 
+        // Pinned spawn (not spawn_player): the movement assert needs a cell
+        // with room to travel right — see the header comment.
         const float extent = s.world.tuning.world_extent;
         const float offset = 64.0f * static_cast<float>(id % 16u);
         sim::spawn(s.world, sim::EntityKind::Cell,
-                   {extent * 0.5f + offset, extent * 0.5f + offset}, 10.0f, id);
+                   {extent * 0.5f + offset, extent * 0.5f + offset},
+                   s.world.tuning.spawn_mass, id);
 
         std::array<std::byte, 8> buffer{};
         net::ByteWriter          writer{.buffer = buffer};
@@ -124,8 +130,7 @@ void server_handle_event(MiniServer& s, const ENetEvent& event)
         const auto id =
             static_cast<sim::PlayerId>(reinterpret_cast<std::uintptr_t>(event.peer->data));
         blob::server::remove_session(s.sessions, id);
-        std::erase_if(s.world.entities,
-                      [id](const sim::Entity& e) { return e.owner == id; });
+        sim::despawn_player(s.world, id);   // entities + standing intent, like main
         break;
     }
     default:
@@ -253,6 +258,11 @@ TEST(Loopback, CursorChaseOverRealUdp)
     bind_address.port = loopback_port;
 
     MiniServer server{};
+    // The wire chain is the thing under test, not gameplay: an empty pellet
+    // field keeps every broadcast a single deterministic chunk, the spawn
+    // mass exactly 10 on first sighting, and the post-disconnect world
+    // exactly empty. Eating has its own suite in core.
+    server.world.tuning.target_pellet_count = 0;
     server.host = enet_host_create(&bind_address, 8,
                                    static_cast<std::size_t>(net::Channel::Count), 0, 0);
     ASSERT_NE(server.host, nullptr) << "cannot bind 127.0.0.1:" << loopback_port;
