@@ -1,8 +1,10 @@
 #pragma once
 
+#include <blob/math/vec2.hpp>
 #include <blob/sim/world.hpp>
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 // Session bookkeeping for connected peers. Deliberately no <enet/enet.h> in
@@ -16,6 +18,14 @@ struct PlayerSession {
     blob::sim::PlayerId id{};
     std::uint16_t       last_sequence{};    ///< highest Input sequence applied so far
     bool                received_input{};   ///< false until the first Input, when last_sequence is meaningless
+
+    // Pre-staged for the parallel M4/M6 branches — fields land here once so
+    // neither branch edits this file.
+    bool pending_split{};   ///< M4: OR-latched from every Input, injected into one tick, then cleared
+    bool pending_eject{};   ///< M4: same latch, eject flag
+    bool received_hello{};  ///< M6: handshake state — no spawn/Welcome until the Hello arrives
+    std::string      nickname;         ///< M6: from Hello (≤ 16 bytes)
+    blob::math::Vec2 last_centroid{};  ///< M6: view centre for interest queries; survives brief cell-less moments
 };
 
 /// Serial-number compare on the u16 circle: is `a` newer than `b`?

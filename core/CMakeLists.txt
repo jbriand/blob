@@ -10,6 +10,7 @@ add_library(blob_core STATIC
     src/math/vec2.cpp
     src/sim/world.cpp
     src/sim/spatial_grid.cpp
+    src/sim/interest.cpp
     src/net/protocol.cpp
 )
 add_library(blob::core ALIAS blob_core)

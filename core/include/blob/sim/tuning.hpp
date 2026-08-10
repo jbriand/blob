@@ -78,6 +78,79 @@ struct Tuning {
     /// factor would silently break frame-rate independence). Gentle by
     /// design: an anti-snowball drag, not a diet.
     float decay_rate = 0.002f;
+
+    // -- M4: split / eject / merge -------------------------------------------
+    // Knobs pre-staged with the M4 iteration's pinned placeholders so parallel
+    // branches never touch this file concurrently; the mechanics land in M4.
+
+    /// A cell may split only at or above this mass, so each half stays a
+    /// viable cell rather than instant food.
+    float min_split_mass = 36.0f;
+
+    /// Hard ceiling on cells per player (the classic 16). Also what keeps a
+    /// virus pop punishing instead of infinite.
+    int max_cells_per_player = 16;
+
+    /// Initial speed of the launched split half along the intent direction,
+    /// world units/s; decays via impulse_damping_rate.
+    float split_impulse_speed = 780.0f;
+
+    /// Exponential damping λ (per second) for Entity impulse velocity and for
+    /// EjectedMass flight — e^(−λ·dt) form, invariant 3, same as decay_rate.
+    float impulse_damping_rate = 3.5f;
+
+    /// Merge cooldown = base + per_mass · mass-at-split, seconds. Mass-scaled
+    /// so big splits stay committed longer.
+    float merge_cooldown_base = 10.0f;
+    float merge_cooldown_per_mass = 0.02f;
+
+    /// Same-owner cells merge when centres are closer than
+    /// merge_overlap · max(r_a, r_b), once both cooldowns have expired.
+    float merge_overlap = 0.25f;
+
+    /// Eject: the cell pays eject_mass_cost, the pellet carries ejected_mass,
+    /// and the difference evaporates — ejecting must never print mass. Cells
+    /// below min_eject_mass cannot eject at all.
+    float min_eject_mass = 35.0f;
+    float eject_mass_cost = 18.0f;
+    float ejected_mass = 14.0f;
+
+    /// Launch speed of an ejected pellet, world units/s; damped by
+    /// impulse_damping_rate.
+    float eject_speed = 1400.0f;
+
+    // -- M5: viruses & safe spawn ----------------------------------------------
+    // Pre-staged like the M4 block; the mechanics land in M5.
+
+    /// Virus population is maintained like pellets: refilled to this count
+    /// from the injected PRNG.
+    int target_virus_count = 40;
+
+    /// Mass of a fresh virus, and the reference the pop gate scales from.
+    float virus_mass = 100.0f;
+
+    /// A pop tries to burst the cell into this many pieces, capped by
+    /// max_cells_per_player.
+    int virus_pop_pieces = 8;
+
+    /// Ejected-mass hits a virus absorbs before it splits toward the feeder.
+    int virus_feed_count = 7;
+
+    /// Safe spawn: try up to safe_spawn_attempts PRNG positions keeping
+    /// safe_spawn_radius clear of any cell at or above safe_spawn_threat_mass;
+    /// the last attempt stands regardless (bounded work, deterministic).
+    float safe_spawn_radius = 600.0f;
+    float safe_spawn_threat_mass = 80.0f;
+    int   safe_spawn_attempts = 16;
+
+    // -- M6: interest management -----------------------------------------------
+    // Pre-staged like the blocks above; the queries land in M6.
+
+    /// Visible radius = view_base + view_mass_factor · √(total player mass):
+    /// everyone sees something at spawn, and growth widens the view following
+    /// the same √ law as drawn radius.
+    float view_base = 640.0f;
+    float view_mass_factor = 24.0f;
 };
 
 /// What the game ships with; also the values the tests pin against.

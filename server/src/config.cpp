@@ -1,5 +1,6 @@
 #include "config.hpp"
 
+#include <algorithm>
 #include <cerrno>
 #include <charconv>
 #include <cmath>
@@ -61,6 +62,27 @@ struct KeyLines {
     int spawn_mass{};
     int decay_threshold{};
     int decay_rate{};
+    int min_split_mass{};
+    int max_cells_per_player{};
+    int split_impulse_speed{};
+    int impulse_damping_rate{};
+    int merge_cooldown_base{};
+    int merge_cooldown_per_mass{};
+    int merge_overlap{};
+    int min_eject_mass{};
+    int eject_mass_cost{};
+    int ejected_mass{};
+    int eject_speed{};
+    int target_virus_count{};
+    int virus_mass{};
+    int virus_pop_pieces{};
+    int virus_feed_count{};
+    int safe_spawn_radius{};
+    int safe_spawn_threat_mass{};
+    int safe_spawn_attempts{};
+    int view_base{};
+    int view_mass_factor{};
+    int snapshot_chunks_per_tick{};
 };
 
 /// Semantic bounds, run once over the final values rather than per
@@ -115,6 +137,81 @@ void validate(const ServerConfig& config, const KeyLines& at, std::vector<Config
     }
     if (!(t.decay_rate >= 0.0f)) {
         errors.push_back({at.decay_rate, "decay_rate must be >= 0 (0 disables decay)"});
+    }
+    if (!(t.min_split_mass > 0.0f)) {
+        errors.push_back({at.min_split_mass, "min_split_mass must be > 0"});
+    }
+    if (t.max_cells_per_player < 1) {
+        errors.push_back({at.max_cells_per_player, "max_cells_per_player must be >= 1"});
+    }
+    if (!(t.split_impulse_speed >= 0.0f)) {
+        errors.push_back({at.split_impulse_speed, "split_impulse_speed must be >= 0"});
+    }
+    if (!(t.impulse_damping_rate >= 0.0f)) {
+        errors.push_back({at.impulse_damping_rate, "impulse_damping_rate must be >= 0"});
+    }
+    if (!(t.merge_cooldown_base >= 0.0f)) {
+        errors.push_back({at.merge_cooldown_base, "merge_cooldown_base must be >= 0"});
+    }
+    if (!(t.merge_cooldown_per_mass >= 0.0f)) {
+        errors.push_back({at.merge_cooldown_per_mass, "merge_cooldown_per_mass must be >= 0"});
+    }
+    if (!(t.merge_overlap > 0.0f) || t.merge_overlap > 1.0f) {
+        errors.push_back({at.merge_overlap, "merge_overlap must be in (0, 1]"});
+    }
+    if (!(t.min_eject_mass > 0.0f)) {
+        errors.push_back({at.min_eject_mass, "min_eject_mass must be > 0"});
+    }
+    if (!(t.eject_mass_cost > 0.0f)) {
+        errors.push_back({at.eject_mass_cost, "eject_mass_cost must be > 0"});
+    }
+    if (!(t.ejected_mass > 0.0f)) {
+        errors.push_back({at.ejected_mass, "ejected_mass must be > 0"});
+    }
+    if (t.ejected_mass > t.eject_mass_cost) {
+        errors.push_back({std::max(at.ejected_mass, at.eject_mass_cost),
+                          "ejected_mass must not exceed eject_mass_cost — ejecting must "
+                          "never print mass"});
+    }
+    if (t.eject_mass_cost > t.min_eject_mass) {
+        errors.push_back({std::max(at.eject_mass_cost, at.min_eject_mass),
+                          "eject_mass_cost must not exceed min_eject_mass — a "
+                          "minimum-mass cell must survive its own eject"});
+    }
+    if (!(t.eject_speed >= 0.0f)) {
+        errors.push_back({at.eject_speed, "eject_speed must be >= 0"});
+    }
+    if (t.target_virus_count < 0) {
+        errors.push_back({at.target_virus_count, "target_virus_count must be >= 0"});
+    }
+    if (!(t.virus_mass > 0.0f)) {
+        errors.push_back({at.virus_mass, "virus_mass must be > 0"});
+    }
+    if (t.virus_pop_pieces < 2) {
+        errors.push_back({at.virus_pop_pieces,
+                          "virus_pop_pieces must be >= 2 — a pop that cannot split is "
+                          "just a meal"});
+    }
+    if (t.virus_feed_count < 1) {
+        errors.push_back({at.virus_feed_count, "virus_feed_count must be >= 1"});
+    }
+    if (!(t.safe_spawn_radius >= 0.0f)) {
+        errors.push_back({at.safe_spawn_radius, "safe_spawn_radius must be >= 0"});
+    }
+    if (!(t.safe_spawn_threat_mass > 0.0f)) {
+        errors.push_back({at.safe_spawn_threat_mass, "safe_spawn_threat_mass must be > 0"});
+    }
+    if (t.safe_spawn_attempts < 1) {
+        errors.push_back({at.safe_spawn_attempts, "safe_spawn_attempts must be >= 1"});
+    }
+    if (!(t.view_base > 0.0f)) {
+        errors.push_back({at.view_base, "view_base must be > 0"});
+    }
+    if (!(t.view_mass_factor >= 0.0f)) {
+        errors.push_back({at.view_mass_factor, "view_mass_factor must be >= 0"});
+    }
+    if (config.snapshot_chunks_per_tick < 1) {
+        errors.push_back({at.snapshot_chunks_per_tick, "snapshot_chunks_per_tick must be >= 1"});
     }
 }
 
@@ -215,6 +312,69 @@ ParseResult parse_config(std::string_view text)
             else { malformed(); }
         } else if (key == "decay_rate") {
             if (float v{}; parse_number(value, v)) { c.tuning.decay_rate = v; at.decay_rate = line_no; }
+            else { malformed(); }
+        } else if (key == "min_split_mass") {
+            if (float v{}; parse_number(value, v)) { c.tuning.min_split_mass = v; at.min_split_mass = line_no; }
+            else { malformed(); }
+        } else if (key == "max_cells_per_player") {
+            if (int v{}; parse_number(value, v)) { c.tuning.max_cells_per_player = v; at.max_cells_per_player = line_no; }
+            else { malformed(); }
+        } else if (key == "split_impulse_speed") {
+            if (float v{}; parse_number(value, v)) { c.tuning.split_impulse_speed = v; at.split_impulse_speed = line_no; }
+            else { malformed(); }
+        } else if (key == "impulse_damping_rate") {
+            if (float v{}; parse_number(value, v)) { c.tuning.impulse_damping_rate = v; at.impulse_damping_rate = line_no; }
+            else { malformed(); }
+        } else if (key == "merge_cooldown_base") {
+            if (float v{}; parse_number(value, v)) { c.tuning.merge_cooldown_base = v; at.merge_cooldown_base = line_no; }
+            else { malformed(); }
+        } else if (key == "merge_cooldown_per_mass") {
+            if (float v{}; parse_number(value, v)) { c.tuning.merge_cooldown_per_mass = v; at.merge_cooldown_per_mass = line_no; }
+            else { malformed(); }
+        } else if (key == "merge_overlap") {
+            if (float v{}; parse_number(value, v)) { c.tuning.merge_overlap = v; at.merge_overlap = line_no; }
+            else { malformed(); }
+        } else if (key == "min_eject_mass") {
+            if (float v{}; parse_number(value, v)) { c.tuning.min_eject_mass = v; at.min_eject_mass = line_no; }
+            else { malformed(); }
+        } else if (key == "eject_mass_cost") {
+            if (float v{}; parse_number(value, v)) { c.tuning.eject_mass_cost = v; at.eject_mass_cost = line_no; }
+            else { malformed(); }
+        } else if (key == "ejected_mass") {
+            if (float v{}; parse_number(value, v)) { c.tuning.ejected_mass = v; at.ejected_mass = line_no; }
+            else { malformed(); }
+        } else if (key == "eject_speed") {
+            if (float v{}; parse_number(value, v)) { c.tuning.eject_speed = v; at.eject_speed = line_no; }
+            else { malformed(); }
+        } else if (key == "target_virus_count") {
+            if (int v{}; parse_number(value, v)) { c.tuning.target_virus_count = v; at.target_virus_count = line_no; }
+            else { malformed(); }
+        } else if (key == "virus_mass") {
+            if (float v{}; parse_number(value, v)) { c.tuning.virus_mass = v; at.virus_mass = line_no; }
+            else { malformed(); }
+        } else if (key == "virus_pop_pieces") {
+            if (int v{}; parse_number(value, v)) { c.tuning.virus_pop_pieces = v; at.virus_pop_pieces = line_no; }
+            else { malformed(); }
+        } else if (key == "virus_feed_count") {
+            if (int v{}; parse_number(value, v)) { c.tuning.virus_feed_count = v; at.virus_feed_count = line_no; }
+            else { malformed(); }
+        } else if (key == "safe_spawn_radius") {
+            if (float v{}; parse_number(value, v)) { c.tuning.safe_spawn_radius = v; at.safe_spawn_radius = line_no; }
+            else { malformed(); }
+        } else if (key == "safe_spawn_threat_mass") {
+            if (float v{}; parse_number(value, v)) { c.tuning.safe_spawn_threat_mass = v; at.safe_spawn_threat_mass = line_no; }
+            else { malformed(); }
+        } else if (key == "safe_spawn_attempts") {
+            if (int v{}; parse_number(value, v)) { c.tuning.safe_spawn_attempts = v; at.safe_spawn_attempts = line_no; }
+            else { malformed(); }
+        } else if (key == "view_base") {
+            if (float v{}; parse_number(value, v)) { c.tuning.view_base = v; at.view_base = line_no; }
+            else { malformed(); }
+        } else if (key == "view_mass_factor") {
+            if (float v{}; parse_number(value, v)) { c.tuning.view_mass_factor = v; at.view_mass_factor = line_no; }
+            else { malformed(); }
+        } else if (key == "snapshot_chunks_per_tick") {
+            if (int v{}; parse_number(value, v)) { c.snapshot_chunks_per_tick = v; at.snapshot_chunks_per_tick = line_no; }
             else { malformed(); }
         } else {
             // An unknown key is an error, never a skip: `base_sped = 900`

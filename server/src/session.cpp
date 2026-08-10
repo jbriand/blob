@@ -6,7 +6,12 @@ namespace blob::server {
 
 PlayerSession& add_session(std::vector<PlayerSession>& sessions, blob::sim::PlayerId id)
 {
-    return sessions.emplace_back(PlayerSession{.id = id});
+    // Default-construct then set the id: a designated initializer that names
+    // only `id` trips -Wmissing-designated-field-initializers under /WX now
+    // that the struct has more fields.
+    PlayerSession& session = sessions.emplace_back();
+    session.id = id;
+    return session;
 }
 
 bool remove_session(std::vector<PlayerSession>& sessions, blob::sim::PlayerId id)

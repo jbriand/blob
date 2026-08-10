@@ -16,6 +16,9 @@ namespace blob::server {
 struct ServerConfig {
     std::uint16_t     port        = 7777;
     std::size_t       max_clients = 64;
+    /// M6: per-peer snapshot budget, in chunks per tick — operational (like
+    /// port), not gameplay, so it lives here rather than in Tuning.
+    int               snapshot_chunks_per_tick = 3;
     blob::sim::Tuning tuning{};
 };
 
