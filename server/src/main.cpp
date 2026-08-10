@@ -202,8 +202,8 @@ void handle_hello(ServerState& state, ENetPeer& peer, blob::server::PlayerSessio
     session.nickname.assign(hello.name.data(), hello.name_len);
     session.received_hello = true;
 
-    // M3 lifecycle: one starting cell of spawn_mass at an rng position (naive
-    // placement — safe-spawn polish is M5's job).
+    // One starting cell of spawn_mass at a safe-spawned position (bounded
+    // rng retries away from threat cells — see sim::spawn_player).
     blob::sim::spawn_player(state.world, session.id);
 
     // Welcome is session state: reliable Control channel (invariant 5).
@@ -503,6 +503,33 @@ int main(int argc, char** argv)
         if (const auto idle = blob::server::time_to_next_tick(loop); idle.count() > 0) {
             if (enet_host_service(host, &event, static_cast<enet_uint32>(idle.count())) > 0) {
                 handle_event(state, event);
+            }
+        }
+    }
+
+    // Orderly exit: every connected peer learns WHY the connection dies —
+    // Goodbye{Shutdown}, reliable — instead of timing out into silence.
+    // disconnect_later + a short bounded drain flushes the send before the
+    // teardown; events arriving during the drain no longer matter.
+    {
+        std::array<std::byte, blob::net::goodbye_bytes> buffer{};
+        blob::net::ByteWriter                           writer{.buffer = buffer};
+        blob::net::write_goodbye(writer, blob::net::GoodbyeReason::Shutdown);
+        const std::span<const std::byte> bytes = blob::net::written(writer);
+        for (std::size_t i = 0; i < host->peerCount; ++i) {
+            ENetPeer& peer = host->peers[i];
+            if (peer.state != ENET_PEER_STATE_CONNECTED) {
+                continue;
+            }
+            enet_peer_send(&peer, static_cast<enet_uint8>(blob::net::Channel::Control),
+                           enet_packet_create(bytes.data(), bytes.size(),
+                                              ENET_PACKET_FLAG_RELIABLE));
+            enet_peer_disconnect_later(&peer, 0);
+        }
+        ENetEvent event{};
+        while (enet_host_service(host, &event, 100) > 0) {
+            if (event.type == ENET_EVENT_TYPE_RECEIVE) {
+                enet_packet_destroy(event.packet);
             }
         }
     }

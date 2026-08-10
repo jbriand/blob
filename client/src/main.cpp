@@ -244,8 +244,9 @@ int main(int argc, char** argv)
 
     SnapshotView view{};
     sf::CircleShape shape;   // one shape reused for every entity drawn
-    // Camera: fixed world-unit size (no zoom curve until interest management),
-    // centred on our first cell, holding its last position while we have none.
+    // Camera: fixed world-unit size, centred on our first cell, holding its
+    // last position while we have none. Adopting the server's √-law zoom curve
+    // (sim::view_radius) is client polish for the interpolation iteration.
     blob::math::Vec2 camera_centre{world_extent * 0.5f, world_extent * 0.5f};
     constexpr sf::Vector2f camera_size{2560.0f, 1440.0f};
 
@@ -363,7 +364,7 @@ int main(int argc, char** argv)
                     static_cast<blob::sim::EntityKind>(record.kind) == blob::sim::EntityKind::Cell) {
                     camera_centre = {blob::net::dequantize_position(record.x, world_extent),
                                      blob::net::dequantize_position(record.y, world_extent)};
-                    break;   // first own cell; multi-cell centroid is M4's problem
+                    break;   // first own cell; a multi-cell centroid is camera polish
                 }
             }
             window.setView(sf::View{{camera_centre.x, camera_centre.y}, camera_size});
@@ -372,7 +373,7 @@ int main(int argc, char** argv)
                 // Display-only maths on wire values (the server keeps the
                 // floats). radius_for_mass over default_tuning diverges
                 // cosmetically if a server config overrides radius_factor —
-                // tuning sync is M6 territory.
+                // tuning sync waits for client-side prediction to need it.
                 const float radius = blob::sim::radius_for_mass(
                     blob::sim::default_tuning, blob::net::dequantize_mass(record.mass));
                 shape.setRadius(radius);

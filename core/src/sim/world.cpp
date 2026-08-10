@@ -225,8 +225,9 @@ void burst_cell(World& world, std::size_t eater_index)
 void resolve_eating(World& world)
 {
     // Deaths are detected by difference: who owned an alive Cell before,
-    // minus who still does after. Eating is the only killer in M3 — decay
-    // floors above zero and despawn is explicitly not death.
+    // minus who still does after. Eating is the only killer — decay floors
+    // above zero, a merge keeps the elder under the same owner, a pop splits
+    // rather than kills, and despawn is explicitly not death.
     collect_cell_owners(world, world.owners_before_scratch);
 
     const std::size_t count = world.entities.size();

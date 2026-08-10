@@ -118,9 +118,11 @@ Why the server is dropping the peer, sent reliably on channel 0 before the hang-
 Zero is not a reason so that a zeroed buffer can never decode as a valid Goodbye, and
 `read_goodbye` rejects by **whitelist, not range check** — an unknown byte is malformed
 wire data, never a "misc" bucket, and a reason removed from the enum some day starts being
-rejected without the check changing shape. Today the shipped server sends only
-`VersionMismatch`; `ServerFull` and `Shutdown` are wire-defined — and the client decodes
-and prints all three human-readably — but no server code path produces them yet.
+rejected without the check changing shape. The shipped server sends `VersionMismatch` on a
+failed Hello and `Shutdown` to every connected peer on orderly exit (reliable, flushed by a
+short bounded drain before teardown); the client decodes and prints all three
+human-readably. `ServerFull` is wire-defined but currently unreachable — ENet's own peer
+cap refuses excess connections at the transport level before any session exists.
 
 ### Snapshot chunk — 7 + n·13 bytes
 
